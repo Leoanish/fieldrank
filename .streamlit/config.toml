@@ -7,7 +7,7 @@ textColor = "#0f172a"
 font = "sans serif"
 
 [server]
-headless = false
+headless = true
 maxUploadSize = 50        # boundary files are small; keeps uploads from eating server memory
 
 [browser]
