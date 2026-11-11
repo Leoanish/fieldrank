@@ -1,0 +1,6 @@
+# Extras for preparing data locally (CSB extraction, soil table build, optional DEM tools, tests)
+-r requirements.txt
+adlfs>=2023.1
+py3dep
+rasterstats
+pytest

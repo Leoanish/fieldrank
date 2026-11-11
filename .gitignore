@@ -1,0 +1,21 @@
+# never commit
+__pycache__/
+.pytest_cache/
+.fieldrank_env
+.DS_Store
+*.tgz
+data/raw/
+data/weather/
+data/_incoming_*
+data/readme_*.md
+# the 205 MB statewide table: the app reads data/fields/tiles/ instead
+data/fields/ga_fields.parquet
+# national soil tables (only needed to build profiles locally)
+data/ancillary/mukey_soil_0_30cm.parquet
+data/ancillary/gnatsgo_mukey_0_30cm.parquet
+
+# committed on purpose:
+#   data/fields/tiles/          ~23 MB (216 tiles + index, largest file ~2 MB)
+#   data/ancillary/lanid/       ~19 MB irrigation layers
+#   data/ancillary/field_profile.parquet   pre-computed elevation / soil / irrigation per field
+#   data/timeseries/            imagery cache (makes examples and earlier searches instant); skipped by publish if > 150 MB

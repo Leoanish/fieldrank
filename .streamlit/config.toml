@@ -1,0 +1,14 @@
+[theme]
+base = "light"
+primaryColor = "#15803d"
+backgroundColor = "#f4f6f9"
+secondaryBackgroundColor = "#eef2f6"
+textColor = "#0f172a"
+font = "sans serif"
+
+[server]
+headless = false
+maxUploadSize = 50        # boundary files are small; keeps uploads from eating server memory
+
+[browser]
+gatherUsageStats = false
