@@ -113,7 +113,8 @@ case "$STEP" in
     bash scripts/publish_repo.sh "${@:2}" ;;
   app)
     say "Starting the dashboard…"
-    python -m streamlit run app/dashboard.py "${@:2}" ;;
+    # headless=false locally so the browser tab opens (the hosted server keeps headless=true from .streamlit/config.toml)
+    python -m streamlit run app/dashboard.py --server.headless false "${@:2}" ;;
   check)
     python -c "import rasterio, geopandas, odc.stac, streamlit; print('rasterio', rasterio.__version__, '| geopandas', geopandas.__version__, '| streamlit', streamlit.__version__)" ;;
   *)
