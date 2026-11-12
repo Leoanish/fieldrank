@@ -527,10 +527,13 @@ def _ls_clear(qa: np.ndarray):
     return (((qa >> 6) & 1) == 1) & (((qa >> 1) & 1) == 0) & (((qa >> 3) & 1) == 0) & (((qa >> 4) & 1) == 0)
 
 
+LS_KIND = "l89vi2"          # Landsat green-up cache: NDVI + EVI2 per field per scene
+
+
 def _ls_scene(item, ids, bbox, labels: _LabelStore, min_pix: int):
     from .imagery import _zonal
-    cols = ["cache_id", "n_pix", "ndvi"]
-    cached = _read_cache("l89ndvi", item.id)
+    cols = ["cache_id", "n_pix", "ndvi", "evi2"]
+    cached = _read_cache(LS_KIND, item.id)
     have = cached[cached["cache_id"].isin(ids)] if cached is not None else pd.DataFrame(columns=cols)
     todo = np.flatnonzero(~np.isin(ids, have["cache_id"].values))
     if len(todo) == 0:
@@ -545,11 +548,11 @@ def _ls_scene(item, ids, bbox, labels: _LabelStore, min_pix: int):
     clr = np.bincount(lp, weights=_ls_clear(qa).ravel().astype("float64"), minlength=n + 1)
     frac = float(clr[1:].sum() / max(tot[1:].sum(), 1))
     worth = (tot[todo + 1] > 0) & (clr[todo + 1] / np.maximum(tot[todo + 1], 1) >= 0.3)
-    new = pd.DataFrame({"cache_id": ids[todo], "n_pix": 0, "ndvi": np.nan})
+    new = pd.DataFrame({"cache_id": ids[todo], "n_pix": 0, "ndvi": np.nan, "evi2": np.nan})
     if not worth.any():
-        _write_cache("l89ndvi", item.id, new)
+        _write_cache(LS_KIND, item.id, new)
         return pd.concat([have, new], ignore_index=True), "cloudy", frac
-    med = np.full(n, np.nan); cnt = np.zeros(n, int)
+    med = np.full(n, np.nan); med2 = np.full(n, np.nan); cnt = np.zeros(n, int)
     for grp in labels.windows(todo[worth], 30, C.MAX_WINDOW_PX):
         ds = _ls_load(item, labels.bounds(grp), ["qa_pixel", "red", "nir08"], 30)
         lab = labels.get(ds, subset=grp)
@@ -558,13 +561,16 @@ def _ls_scene(item, ids, bbox, labels: _LabelStore, min_pix: int):
         R = ds["red"].values[keep].astype("float32") * 0.0000275 - 0.2
         N = ds["nir08"].values[keep].astype("float32") * 0.0000275 - 0.2
         del ds, keep, lab
-        md, _, _, c = _zonal((N - R) / (N + R + 1e-6), lab1, n, (R > 0) & (N > 0))
+        ok_ = (R > 0) & (N > 0)
+        md, _, _, c = _zonal((N - R) / (N + R + 1e-6), lab1, n, ok_)
+        md2, _, _, _ = _zonal(2.5 * (N - R) / (N + 2.4 * R + 1.0), lab1, n, ok_)
         g_ = c > 0
-        med[g_], cnt[g_] = md[g_], c[g_]
+        med[g_], med2[g_], cnt[g_] = md[g_], md2[g_], c[g_]
     ok = cnt[todo] >= max(C.MIN_PIXELS_10M // 9, 6)
     new["n_pix"] = cnt[todo].astype(int)
     new["ndvi"] = np.where(ok, med[todo], np.nan)
-    _write_cache("l89ndvi", item.id, new)
+    new["evi2"] = np.where(ok, med2[todo], np.nan)
+    _write_cache(LS_KIND, item.id, new)
     return pd.concat([have, new], ignore_index=True), "read", frac
 
 
@@ -599,7 +605,7 @@ def landsat_series(fields, start: dt.date, end: dt.date, workers: int | None = N
             progress(0.05 + 0.93 * (i + 1) / max(len(items), 1), f"Landsat · {i + 1}/{len(items)} · {date.date()} · {tag} · {len(good)} fields")
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
-    cols = ["field_id", "date", "ndvi", "n_pix"]
-    df = pd.concat(out, ignore_index=True)[cols] if out else pd.DataFrame(columns=cols)
-    df = _numeric(df, ["ndvi", "n_pix"])
+    cols = ["field_id", "date", "ndvi", "evi2", "n_pix"]
+    df = pd.concat(out, ignore_index=True).reindex(columns=cols) if out else pd.DataFrame(columns=cols)
+    df = _numeric(df, ["ndvi", "evi2", "n_pix"])
     return df, len(items), used

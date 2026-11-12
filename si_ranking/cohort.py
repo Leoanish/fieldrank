@@ -30,7 +30,7 @@ import pandas as pd
 from . import config as C
 from .imagery import _rasterize_fields, _zonal  # noqa: F401  (Landsat tier)
 
-CACHE_VERSION = "v6-buf30"   # bump when detector/search changes -> old caches ignored
+CACHE_VERSION = "v7-evi2-curve"   # bump when detector/search changes -> old caches ignored
 GREENUP_DELTA = 0.10           # rise above bare-soil baseline that marks green-up
 GREENUP_CONFIRM_ABS = 0.28     # canopy must reach this NDVI ...
 GREENUP_CONFIRM_REL = 0.15     # ... and baseline + this, to count as a real crop
@@ -41,7 +41,7 @@ COVERAGE_TRIGGER = 0.90        # tier 2 if fewer than 90 % of fields detected
 GAP_TRIGGER = 12               # tier 2 if target's bracketing gap > 12 d
 CONF_MED, CONF_HIGH = 0.4, 0.7
 PC_STAC = "https://planetarycomputer.microsoft.com/api/stac/v1"
-TS_COLS = ["field_id", "date", "ndvi", "n_pix", "sensor"]
+TS_COLS = ["field_id", "date", "ndvi", "evi2", "n_pix", "sensor"]
 
 
 def _cache_key(fields: gpd.GeoDataFrame, planting: dt.date) -> str:
@@ -73,17 +73,19 @@ def _s2_series(fields, planting, days_before, days_after, log, progress):
     progress(0.0, f"Sentinel-2 · searching {start} → {end}…")
     parts, used = [], 0
     if cut > start:
-        d1, _, u1 = scenes.series(fields, start, min(cut - dt.timedelta(days=1), end), {"ndvi": ("nir", "red")}, kind="ndvi",
+        d1, _, u1 = scenes.series(fields, start, min(cut - dt.timedelta(days=1), end),
+                                  {"ndvi": ("nir", "red"), "evi2": ("evi2", "nir", "red")}, kind="ndvi_evi2",
                                   min_pix=C.MIN_PIXELS_10M, min_clear=MIN_SCENE_CLEAR,
                                   progress=lambda f, m: progress(f1 * f, m), log=log)
-        parts.append(d1[["field_id", "date", "n_pix", "ndvi"]]); used += u1
+        parts.append(d1[["field_id", "date", "n_pix", "ndvi", "evi2"]]); used += u1
     if cut <= end:
         d2, _, u2 = scenes.series(fields, cut, end, dict(C.VI_ENGINE), kind=C.VI_KIND,
                                   min_pix=C.MIN_PIXELS_10M, min_clear=MIN_SCENE_CLEAR,
                                   progress=lambda f, m: progress(0.35 + 0.6 * f, m), log=log)
-        parts.append(d2[["field_id", "date", "n_pix", "NDVI"]].rename(columns={"NDVI": "ndvi"})); used += u2
-    df = pd.concat([p_ for p_ in parts if len(p_)], ignore_index=True) if any(len(p_) for p_ in parts) else pd.DataFrame(columns=["field_id", "date", "n_pix", "ndvi"])
+        parts.append(d2[["field_id", "date", "n_pix", "NDVI", "EVI2"]].rename(columns={"NDVI": "ndvi", "EVI2": "evi2"})); used += u2
+    df = pd.concat([p_ for p_ in parts if len(p_)], ignore_index=True) if any(len(p_) for p_ in parts) else pd.DataFrame(columns=["field_id", "date", "n_pix", "ndvi", "evi2"])
     ts = pd.DataFrame({"field_id": df["field_id"], "date": pd.to_datetime(df["date"]), "ndvi": pd.to_numeric(df["ndvi"], errors="coerce"),
+                       "evi2": pd.to_numeric(df.get("evi2"), errors="coerce"),
                        "n_pix": pd.to_numeric(df["n_pix"], errors="coerce").fillna(0).astype(int), "sensor": "S2"}, columns=TS_COLS)
     return ts, used
 
@@ -103,21 +105,27 @@ def _landsat_series(fields, planting, days_before, days_after, log, progress):
         df, n_found, used = scenes.landsat_series(fields, start, end, progress=progress, log=log)
     except Exception as e:
         log(f"Landsat failed: {type(e).__name__}: {e}"); return pd.DataFrame(columns=TS_COLS), 0
-    ts = pd.DataFrame({"field_id": df["field_id"], "date": pd.to_datetime(df["date"]), "ndvi": df["ndvi"],
+    ts = pd.DataFrame({"field_id": df["field_id"], "date": pd.to_datetime(df["date"]), "ndvi": df["ndvi"], "evi2": df.get("evi2"),
                        "n_pix": pd.to_numeric(df["n_pix"], errors="coerce").fillna(0).astype(int), "sensor": "L89"}, columns=TS_COLS)
     log(f"Landsat: {n_found} scenes, {used} used")
     return ts, used
 
 
 # ----------------------------------------------------------------------------- detection + confidence
-def detect_greenup(s: pd.DataFrame, planting: dt.date | None = None) -> dict:
-    """s: DataFrame[date, ndvi, sensor] for one field (green-up window)."""
+ONSET_FRAC = 0.20          # green-up = the day the fitted curve has made 20 % of the field's own rise (≈ base + 0.10 NDVI)
+FIT_MAX_NRMSE = 0.20       # a fit is usable when its error is ≤ 20 % of the rise
+AGREE_DAYS = 6             # NDVI and EVI2 green-ups this close → the date is confirmed
+
+
+def _crossing(s: pd.DataFrame, planting: dt.date | None = None) -> dict:
+    """Threshold crossing on NDVI (base + 0.10): decides the status (crossing / not emerged / …) and is the fallback date."""
     out = {"greenup_date": None, "greenup_status": "too_few_obs", "gap_days": np.nan, "rise": np.nan, "mono": np.nan,
            "n_obs": 0, "sensors": "", "confidence": 0.0, "conf_label": "none"}
     if len(s) == 0:
         return out
     s = s.dropna(subset=["ndvi"]).sort_values("date")
-    s = s.groupby("date", as_index=False).agg(ndvi=("ndvi", "max"), sensor=("sensor", lambda x: "+".join(sorted(set(x)))))
+    if s["date"].duplicated().any():          # same day from two sensors: keep the higher value (fast path skips this)
+        s = s.groupby("date", as_index=False).agg(ndvi=("ndvi", "max"), sensor=("sensor", lambda x: "+".join(sorted(set(x)))))
     out["n_obs"] = len(s)
     out["sensors"] = "+".join(sorted(set("+".join(s["sensor"]).split("+")))) if len(s) else ""
     if len(s) < 3:
@@ -166,12 +174,100 @@ def detect_greenup(s: pd.DataFrame, planting: dt.date | None = None) -> dict:
     return out
 
 
+
+
+_S_GRID = np.array([2.0, 3.0, 4.0, 5.0, 6.5, 8.0, 10.0, 13.0, 17.0, 22.0])      # curve steepness (days)
+
+
+def _fit_onset(t: np.ndarray, v: np.ndarray, base: float, peak_i: int):
+    """Fit an S-curve  v = b + a / (1 + exp(-(t - t0)/s))  through the looks up to the peak (bare soil → canopy).
+    Fast and stable: every (t0, s) on a grid, with b and a solved exactly by least squares, best fit kept.
+    Returns (onset_day, nrmse, amplitude) or None. Onset = the day the curve reaches ONSET_FRAC of its rise."""
+    tt, vv = t[:peak_i + 1], v[:peak_i + 1]
+    ok = np.isfinite(vv)
+    tt, vv = tt[ok], vv[ok]
+    if len(tt) < 4:
+        return None
+    t0s = np.arange(tt[0] - 10, tt[-1] + 3, 0.5)
+    T0, S = np.meshgrid(t0s, _S_GRID, indexing="ij")
+    X = 1.0 / (1.0 + np.exp(-(tt[None, None, :] - T0[..., None]) / S[..., None]))     # (t0, s, n)
+    xm, vm = X.mean(-1), vv.mean()
+    cov = ((X - xm[..., None]) * (vv - vm)).mean(-1); var = X.var(-1)
+    A = np.where(var > 1e-9, cov / np.maximum(var, 1e-9), 0.0)
+    B = vm - A * xm
+    sse = ((B[..., None] + A[..., None] * X - vv) ** 2).sum(-1)
+    sse = np.where((A >= 0.05) & (np.abs(B - base) <= 0.15), sse, np.inf)          # a real rise, starting near the field's bare soil
+    if not np.isfinite(sse).any():
+        return None
+    i, j = np.unravel_index(np.argmin(sse), sse.shape)
+    a_, t0, s_ = float(A[i, j]), float(T0[i, j]), float(S[i, j])
+    onset = t0 - s_ * np.log(1 / ONSET_FRAC - 1)
+    nrmse = float(np.sqrt(sse[i, j] / len(tt)) / max(a_, 1e-6))
+    if onset < tt[0] - 5 or onset > tt[-1]:          # extrapolated before the first look, or never reached
+        return None
+    return float(onset), nrmse, a_
+
+
+def detect_greenup(s: pd.DataFrame, planting: dt.date | None = None) -> dict:
+    """s: DataFrame[date, ndvi, (evi2), sensor] for one field (green-up window).
+    1. NDVI threshold crossing decides whether the crop came up in the window (status) — and is the fallback date.
+    2. A smooth S-curve is fitted to NDVI and to EVI2 (less sensitive to soil colour and wetness); green-up = the day the
+       curve reaches 20 % of the field's own rise. Both agree within AGREE_DAYS → the date is confirmed."""
+    out = _crossing(s[["date", "ndvi", "sensor"]], planting)
+    out.update({"method": "crossing" if out["greenup_status"] == "crossing" else "", "onset_ndvi": None, "onset_evi2": None,
+                "agree_days": np.nan, "fit_nrmse": np.nan})
+    if out["greenup_status"] != "crossing":
+        return out
+    s = s.dropna(subset=["ndvi"]).sort_values("date")
+    if s["date"].duplicated().any():
+        agg = {"ndvi": ("ndvi", "max")}
+        if "evi2" in s:
+            agg["evi2"] = ("evi2", "max")
+        s = s.groupby("date", as_index=False).agg(**agg)
+    d0 = s["date"].min()
+    t = ((s["date"] - d0).dt.total_seconds() / 86400.0).to_numpy()
+    pl_t = (pd.Timestamp(planting) - d0).total_seconds() / 86400.0 if planting is not None else -np.inf
+    fits = {}
+    for col in ("ndvi", "evi2"):
+        if col not in s or s[col].notna().sum() < 4:
+            continue
+        v = s[col].to_numpy(dtype=float)
+        pre = v[(t <= pl_t + 5) & np.isfinite(v)]
+        base = float(np.quantile(pre, 0.2)) if len(pre) >= 2 else float(np.nanmin(v[:2]))
+        after = np.flatnonzero((t >= pl_t) & np.isfinite(v))
+        if not len(after):
+            continue
+        peak_i = int(after[np.nanargmax(v[after])])
+        r = _fit_onset(t, v, base, peak_i)
+        if r is not None and r[1] <= FIT_MAX_NRMSE:
+            fits[col] = r
+    day = lambda x: (d0 + pd.Timedelta(days=float(x))).date()
+    if "ndvi" in fits:
+        out["onset_ndvi"] = day(fits["ndvi"][0])
+    if "evi2" in fits:
+        out["onset_evi2"] = day(fits["evi2"][0])
+    if fits:
+        if len(fits) == 2:
+            diff = abs(fits["ndvi"][0] - fits["evi2"][0])
+            out["agree_days"] = round(diff, 1)
+            onset = (fits["ndvi"][0] + fits["evi2"][0]) / 2 if diff <= 2 * AGREE_DAYS else min(fits.values(), key=lambda r: r[1])[0]
+        else:
+            onset = next(iter(fits.values()))[0]
+        out["fit_nrmse"] = round(min(r[1] for r in fits.values()), 3)
+        out["greenup_date"] = day(onset); out["method"] = "curve"
+        # clear looks around the curve's green-up
+        before, after_ = t[t <= onset], t[t > onset]
+        if len(before) and len(after_):
+            out["gap_days"] = int(round(after_.min() - before.max()))
+    return out
+
+
 def _detect_all(ts: pd.DataFrame, fields: gpd.GeoDataFrame, planting) -> pd.DataFrame:
     recs = []
     groups = {k: g for k, g in ts.groupby("field_id")} if len(ts) else {}
     for fid_ in fields["field_id"]:
-        g = groups.get(fid_, pd.DataFrame(columns=["date", "ndvi", "sensor"]))
-        d = detect_greenup(g[["date", "ndvi", "sensor"]], planting)
+        g = groups.get(fid_, pd.DataFrame(columns=["date", "ndvi", "evi2", "sensor"]))
+        d = detect_greenup(g.reindex(columns=["date", "ndvi", "evi2", "sensor"]), planting)
         d["field_id"] = fid_; recs.append(d)
     return pd.DataFrame(recs)
 

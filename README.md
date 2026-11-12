@@ -11,8 +11,9 @@ words — **“Should I scout my field?”** — and shows the rank, a map and t
 1. **Pick a field** — click it on the map, upload a boundary (shapefile, KML/KMZ, GeoJSON, GeoPackage, CSV) or load one
    of the example fields. Field boundaries come from the USDA Crop Sequence Boundaries (78,985 Georgia fields, 2025 crop labels).
 2. **Find comparable fields** — same crop, within the search radius, planted within ± 10 days of your date. Each
-   neighbour's planting date is worked back from its satellite green-up with local weather (degree-days), calibrated on
-   your own field, and marked high or low confidence. Optional filters: same irrigation, similar elevation, similar soil texture.
+   neighbour's green-up is found by fitting a smooth growth curve to its NDVI and EVI2, its planting date is worked back
+   from that with local weather (degree-days) calibrated on your own field, and it is marked **well dated** (both indices
+   agree, clear images around it — good to about a week) or **roughly dated** (blurred by clouds or a weak signal). Optional filters: same irrigation, similar elevation, similar soil texture.
 3. **Rank my field** on any date — every comparable field is read on its clear image nearest that date, images of
    different days are calibrated to each other, and
 
@@ -42,7 +43,7 @@ Streamlit Community Cloud.
 - **Georgia only** for now, and crop labels are from 2025 — in later seasons a field may have rotated to another crop.
 - **Greenness is not yield.** Satellites show *that* a field is behind its neighbours, not *why*; the field visit tells
   you the cause. During the yield-critical stage the gap is the best early warning there is.
-- Planting-date estimates are model-based (± about a week for high-confidence fields).
+- Planting-date estimates are model-based (± about a week for well-dated fields, 1–2 weeks for roughly dated ones).
 - The free hosting has limited memory: a search is capped at the nearest 450 same-crop fields and 20 km, and when
   several people search at once the extra searches wait their turn.
 

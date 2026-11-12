@@ -16,11 +16,11 @@ Estimate
   2. Each field's planting = walk back from its green-up, adding up daily GDD until that thermal time is reached.
      Without weather data the same is done in days (own-field lag, or the crop default).
   3. Uncertainty (± days) = half the gap between the two clear images around the green-up + 2 days for crop/soil spread.
-  4. Confidence, two classes:
-       high  green-up bracketed by clear images ≤ HIGH_MAX_GAP days apart, a clear rise and a steady climb after it
-             → planting date good to about ± 1 week;
-       low   green-up seen, but images far apart (clouds), a weak or noisy rise, or a Landsat-only bracket
-             → planting date could be off by a week or more.
+  4. Date quality, two classes (shown as "well dated" / "roughly dated"):
+       well dated     a smooth growth curve fits the field, NDVI and EVI2 agree on the green-up within 6 days, clear
+                      images ≤ 15 days apart around it and a real rise → planting date good to about ± 1 week;
+       roughly dated  green-up seen, but blurred: cloudy weeks, too few looks for a curve, the two indices disagree,
+                      a weak rise or Landsat only → could be off by 1–2 weeks.
      Fields with no visible green-up in the window get no planting date (planted later, too cloudy, or green earlier).
 """
 from __future__ import annotations
@@ -42,31 +42,40 @@ GDD_OK = (0.4, 2.5)                 # own-field thermal time accepted within thi
 HIGH_MAX_GAP = 15                   # clear images ≤ 15 d apart around the green-up → about ± 1 week
 HIGH_MIN_RISE = 0.12
 HIGH_MIN_MONO = 0.6
+AGREE = 6                           # NDVI vs EVI2 green-up, days
 LAG_SPREAD_DAYS = 2.0
 
 
 def plant_confidence(row) -> str | None:
+    """'high' = well dated · 'low' = roughly dated · None = no green-up seen in the window.
+    Well dated needs all of: a smooth growth curve fitted to the field (not just two points), NDVI and EVI2 giving the
+    same green-up within AGREE days (when both fit), clear images ≤ HIGH_MAX_GAP days apart around it, a real rise,
+    and Sentinel-2 in the bracket (not Landsat only)."""
     if row.get("greenup_status") != "crossing" or pd.isna(row.get("greenup_date")):
         return None
-    gap, rise, mono = row.get("gap_days"), row.get("rise"), row.get("mono")
-    ok = (pd.notna(gap) and gap <= HIGH_MAX_GAP and pd.notna(rise) and rise >= HIGH_MIN_RISE
-          and pd.notna(mono) and mono >= HIGH_MIN_MONO and str(row.get("sensors", "S2")) != "L89")
-    return "high" if ok else "low"
+    return "high" if not _low_reasons(row) else "low"
+
+
+def _low_reasons(row) -> list[str]:
+    r = []
+    if row.get("method", "curve") != "curve":
+        r.append("no smooth growth curve (too few clear looks on the rise)")
+    ag = row.get("agree_days")
+    if pd.notna(ag) and ag > AGREE:
+        r.append(f"NDVI and EVI2 disagree by {ag:.0f} days")
+    gap = row.get("gap_days")
+    if pd.isna(gap) or gap > HIGH_MAX_GAP:
+        r.append(f"clear images {gap:.0f} days apart around the green-up (clouds)" if pd.notna(gap) else "no clear images around the green-up")
+    rise = row.get("rise")
+    if pd.isna(rise) or rise < HIGH_MIN_RISE:
+        r.append("weak rise")
+    if str(row.get("sensors", "")) == "L89":
+        r.append("Landsat only")
+    return r
 
 
 def why_low(row) -> str:
-    if row.get("greenup_status") != "crossing":
-        return ""
-    r = []
-    if pd.isna(row.get("gap_days")) or row["gap_days"] > HIGH_MAX_GAP:
-        r.append(f"clear images {row.get('gap_days', float('nan')):.0f} days apart around the green-up (clouds)")
-    if pd.isna(row.get("rise")) or row["rise"] < HIGH_MIN_RISE:
-        r.append("weak rise")
-    if pd.isna(row.get("mono")) or row["mono"] < HIGH_MIN_MONO:
-        r.append("noisy climb after green-up")
-    if str(row.get("sensors", "")) == "L89":
-        r.append("Landsat only")
-    return ", ".join(r)
+    return ", ".join(_low_reasons(row)) if row.get("greenup_status") == "crossing" else ""
 
 
 def _cum_gdd(wx: pd.DataFrame, crop: str):
