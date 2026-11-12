@@ -340,7 +340,7 @@ def planting_cohort(fields: gpd.GeoDataFrame, target_id: str, planting: dt.date,
     progress = progress or (lambda f, m: None)
     key = _cache_key(fields, planting)
     p = C.TS_DIR / f"greenup_{key}.parquet"
-    source = "Sentinel-2"
+    source = "Sentinel-2"; hls_note = ""
     if use_cache and p.exists():
         ts = pd.read_parquet(p)
         if "sensor" not in ts:
@@ -356,7 +356,8 @@ def planting_cohort(fields: gpd.GeoDataFrame, target_id: str, planting: dt.date,
                 ts, n_s2, n_l = _hls_series(fields, planting, days_before, days_after, log, progress)
                 source = "HLS"
             except Exception as e:                                 # service down / not installed → native Sentinel-2
-                log(f"HLS unavailable ({type(e).__name__}: {e}) — using Sentinel-2"); ts = None
+                hls_note = f"{type(e).__name__}: {str(e)[:160]}"
+                log(f"HLS unavailable ({hls_note}) — using Sentinel-2"); ts = None
         if ts is None:
             ts, n_s2 = _s2_series(fields, planting, days_before, days_after, log, progress); n_l = 0
     progress(0.96, f"Detecting green-up ({'HLS: Sentinel-2 + Landsat' if source == 'HLS' else 'Sentinel-2'})…")
@@ -399,7 +400,7 @@ def planting_cohort(fields: gpd.GeoDataFrame, target_id: str, planting: dt.date,
         det["in_window"] = det["in_window"] & (det["irrigated"].eq(mine) | det["field_id"].eq(target_id))
     det["ref_ok"] = det["in_window"] & (det["confidence"] >= CONF_MED)
     info = {"anchor_greenup": anchor, "anchor_source": anchor_src, "anchor_observed": bool(anchor_obs), "n_scenes": int(n_s2), "n_landsat": int(n_l),
-            "tier2": bool(need_l), "tier2_reason": tier2_reason, "landsat_cal": ls_cal, "source": source,
+            "tier2": bool(need_l), "tier2_reason": tier2_reason, "landsat_cal": ls_cal, "source": source, "hls_note": hls_note,
             "n_detected": int(det["greenup_date"].notna().sum()), "n_in_window": int(det["in_window"].sum()),
             "n_high": int((det["conf_label"] == "high").sum()), "n_medium": int((det["conf_label"] == "medium").sum()),
             "n_low": int((det["conf_label"] == "low").sum()),

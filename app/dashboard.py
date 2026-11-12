@@ -2132,6 +2132,27 @@ with tab_g:
          + (' — counted in heat units, so they are at the same crop stage —' if HEAT_MATCH else '')
          + ' are comparable (green shading below).</div></div>'
          '</div>')
+with tab_g:                                   # which satellites timed the green-up, and how often my field was seen
+    _src = info.get("source", "Sentinel-2")
+    _mg = gts[gts["field_id"] == "MY_FIELD"] if len(gts) else gts
+    _md = pd.to_datetime(_mg["date"]).drop_duplicates().sort_values() if len(_mg) else pd.Series(dtype="datetime64[ns]")
+    _gap = float(_md.diff().dt.days.median()) if len(_md) >= 2 else float("nan")
+    _ns = int(_mg.loc[_mg["sensor"].isin(["S30", "S2"]), "date"].nunique()) if len(_mg) and "sensor" in _mg else 0
+    _nl = int(_mg.loc[_mg["sensor"].isin(["L30", "L89"]), "date"].nunique()) if len(_mg) and "sensor" in _mg else 0
+    _span = f"{_md.min():%b %d} – {_md.max():%b %d}" if len(_md) else ""
+    if _src == "HLS":
+        html(f'<div class="callout info"><b>🛰️ Green-up from NASA HLS</b> (Sentinel-2 + Landsat, harmonised, 30 m) · '
+             f'area: {info.get("n_scenes", 0)} Sentinel-2 + {info.get("n_landsat", 0)} Landsat dates with clear fields · '
+             f'<b>my field: {len(_md)} clear looks</b> ({_ns} Sentinel-2 + {_nl} Landsat) {_span}'
+             + (f' · a look every <b>{_gap:.1f} days</b> (median)' if _gap == _gap else "")
+             + '. Satellites pass every ~1.6 days; cloudy passes are skipped, so clear looks are less frequent.</div>')
+    else:
+        html(f'<div class="callout warn"><b>Green-up from Sentinel-2 only</b> (10 m) · my field: {len(_md)} clear looks'
+             + (f', one every {_gap:.1f} days' if _gap == _gap else "") + '. '
+             + ("NASA HLS could not be read this time (" + info["hls_note"] + ") — press <b>Find comparable fields</b> again to retry."
+                if info.get("hls_note") else
+                "These comparable fields were found before the HLS update — press <b>Find comparable fields</b> again to use HLS."
+                if "source" not in info else "HLS is switched off under Advanced.") + '</div>')
 with tab_g, card():
     if gts.empty:
         st.info("No clear observations in the green-up window.")
@@ -2154,7 +2175,7 @@ with tab_g, card():
             gp["group"] = np.where(gp["field_id"] == "MY_FIELD", "my field", np.where(gp["category"].eq("comparable"), "comparable", "other"))
             if "sensor" not in gp:
                 gp["sensor"] = "S2"
-            gp["sensor"] = gp["sensor"].fillna("S2").map({"S2": "Sentinel-2", "S30": "Sentinel-2", "L89": "Landsat", "L30": "Landsat"}).fillna("Sentinel-2")
+            gp["sensor"] = gp["sensor"].fillna("S2").map({"S2": "Sentinel-2 10 m", "S30": "HLS Sentinel-2", "L89": "Landsat", "L30": "HLS Landsat"}).fillna("Sentinel-2 10 m")
             sc_ = alt.Scale(domain=["my field", "comparable", "other"], range=[BLUE, "#16a34a", "#e2e8f0"])
             _pl = pd.Timestamp(R["planting"])
             band = alt.Chart(pd.DataFrame({"s": [_pl - pd.Timedelta(days=window)], "e": [_pl + pd.Timedelta(days=window)],
@@ -2167,9 +2188,9 @@ with tab_g, card():
             mine = (alt.Chart(my_).mark_line(strokeWidth=3.5).encode(x="date:T", y="ndvi:Q", color=alt.Color("group:N", scale=sc_, legend=None))
                     + alt.Chart(my_).mark_point(size=70, filled=True, strokeWidth=2).encode(
                         x="date:T", y="ndvi:Q", color=alt.value(BLUE),
-                        shape=alt.Shape("sensor:N", scale=alt.Scale(domain=["Sentinel-2", "Landsat"], range=["circle", "diamond"]),
-                                        legend=alt.Legend(title=None, orient="top") if (my_["sensor"] != "Sentinel-2").any() else None),
-                        fill=alt.condition(alt.datum.sensor == "Sentinel-2", alt.value(BLUE), alt.value("#ffffff")),
+                        shape=alt.Shape("sensor:N", scale=alt.Scale(domain=["HLS Sentinel-2", "HLS Landsat", "Sentinel-2 10 m", "Landsat"], range=["circle", "diamond", "square", "triangle-up"]),
+                                        legend=alt.Legend(title=None, orient="top")),
+                        fill=alt.condition(alt.datum.sensor == "HLS Landsat", alt.value("#ffffff"), alt.value(BLUE)),
                         tooltip=[alt.Tooltip("date:T", format="%b %d"), alt.Tooltip("ndvi:Q", format=".3f", title=gi_), alt.Tooltip("sensor:N")]))
             rules = alt.Chart(pd.DataFrame({"x": [pd.Timestamp(R["planting"]), anchor], "l": ["planting", "my green-up"]})).mark_rule(strokeDash=[5, 4], strokeWidth=2).encode(
                 x="x:T", color=alt.Color("l:N", scale=alt.Scale(domain=["planting", "my green-up"], range=[INK, BLUE]), legend=alt.Legend(title=None, orient="top")))
