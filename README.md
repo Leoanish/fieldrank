@@ -4,7 +4,7 @@ FieldRank compares a corn, cotton, peanut or soybean field in Georgia with nearb
 planted at about the same time, using free Sentinel-2 (and Landsat) satellite images. It answers one question in plain
 words — **“Should I scout my field?”** — and shows the rank, a map and the evidence behind it.
 
-**Live app:** see the link in this repository's *About* box (top right).
+**Live app: [fieldrank.streamlit.app](https://fieldrank.streamlit.app)** — free, no sign-in.
 
 ## How it works
 
