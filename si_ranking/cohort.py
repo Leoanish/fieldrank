@@ -30,7 +30,7 @@ import pandas as pd
 from . import config as C
 from .imagery import _rasterize_fields, _zonal  # noqa: F401  (Landsat tier)
 
-CACHE_VERSION = "v7-evi2-curve"   # bump when detector/search changes -> old caches ignored
+CACHE_VERSION = "v8-evi2-curve-trough"   # bump when detector/search changes -> old caches ignored
 GREENUP_DELTA = 0.10           # rise above bare-soil baseline that marks green-up
 GREENUP_CONFIRM_ABS = 0.28     # canopy must reach this NDVI ...
 GREENUP_CONFIRM_REL = 0.15     # ... and baseline + this, to count as a real crop
@@ -186,6 +186,12 @@ def _fit_onset(t: np.ndarray, v: np.ndarray, base: float, peak_i: int):
     tt, vv = t[:peak_i + 1], v[:peak_i + 1]
     ok = np.isfinite(vv)
     tt, vv = tt[ok], vv[ok]
+    # start at the bare-soil low point before the crop's rise: anything green before it (a winter cover crop, weeds,
+    # last year's stubble greening) is not this crop and would break the S-curve
+    if len(vv) >= 3:
+        lo = int(np.argmin(vv[:-1]))
+        keep_from = max(lo - 1, 0) if lo > 0 and vv[lo - 1] - vv[lo] < 0.05 else lo   # keep one more bare look if it is bare too
+        tt, vv = tt[keep_from:], vv[keep_from:]
     if len(tt) < 4:
         return None
     t0s = np.arange(tt[0] - 10, tt[-1] + 3, 0.5)

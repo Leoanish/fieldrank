@@ -1185,6 +1185,17 @@ with k1, card():
     html(f'<div class="kpi hero"><div class="lab">Comparable fields <span style="opacity:.75">(not counting mine)</span></div><div class="val">{n_final} <small>of {n_all} {R["crop"]} fields</small></div>'
          f'<div class="bar"><i style="width:{max(n_final / max(n_all, 1) * 100, 2):.0f}%"></i></div>'
          f'<div class="sub">matched on {" · ".join(active)} · within {R["radius"]} km</div></div>')
+    if n_final < 8 and n_all >= 10:
+        # few left: say which step removed the most, and what to loosen
+        _nd = int((nb["plant_conf"].eq("high") | (nb["plant_conf"].eq("low") & (plant_mode == "All estimated"))).sum())
+        _steps = [("planting date found", n_all - _nd, "choose “+ roughly dated” in the sidebar" if plant_mode == "High confidence" else "pick a later check date or a wider radius"),
+                  (f"planted within ± {window} d", _nd - n_plant, "widen “Planting within ± days”, or check the planting date you entered")]
+        _prev = n_plant
+        for _, lab_, n_, _r in STAGES:
+            _steps.append((lab_.lower(), _prev - n_, f"switch off “{lab_}”")); _prev = n_
+        big_ = max(_steps, key=lambda x: x[1])
+        if big_[1] > 0:
+            html(f'<div class="rankst warn">Most fields were dropped at <b>{big_[0]}</b> (−{big_[1]}). To compare with more: {big_[2]}.</div>')
     with popover("How 'similar' is decided"):
         st.markdown(f"- **Planting** — estimated planting date within ± {window} days of the date I entered (always on) · "
                     f"{'well-dated fields only' if plant_mode == 'High confidence' else 'well and roughly dated fields'}\n"
@@ -1538,10 +1549,12 @@ with tab_f:
     with f1, card():
         html('<div class="ctitle" style="font-size:1.15rem">How the comparison set is built</div>'
              '<div class="csub">each step keeps only the fields that are similar to mine — switch filters on or off in the sidebar</div>')
+        n_dated = int((nb["plant_conf"].eq("high") | (nb["plant_conf"].eq("low") & (plant_mode == "All estimated"))).sum())
         stages = [("In search area", n_all, f"{R['crop']} · ≥ {C.CROP_PARAMS[R['crop']].min_acres_10m:.0f} ac · within {R['radius']} km"),
-                  ("Similar planting", n_plant, f"planted within ± {window} d of mine · {'well dated only' if plant_mode == 'High confidence' else '+ roughly dated'}")]
+                  ("Planting date found", n_dated, "well dated" if plant_mode == "High confidence" else "well or roughly dated"),
+                  ("Similar planting", n_plant, f"planted within ± {window} days of mine")]
         stages += [(lab, n, rule) for _, lab, n, rule in STAGES]
-        pal = [("#f1f5f9", "#e2e8f0", "#0f172a"), ("#dcfce7", "#bbf7d0", "#14532d"), ("#bbf7d0", "#86efac", "#14532d"),
+        pal = [("#f1f5f9", "#e2e8f0", "#0f172a"), ("#f0fdf4", "#dcfce7", "#14532d"), ("#dcfce7", "#bbf7d0", "#14532d"), ("#bbf7d0", "#86efac", "#14532d"),
                ("#86efac", "#4ade80", "#14532d"), ("#4ade80", "#22c55e", "#052e16")]
         W, H, GAP, LBL = 760, 84, 12, 150
         FW = W - LBL                                       # funnel area; right column holds the "dropped" badges
