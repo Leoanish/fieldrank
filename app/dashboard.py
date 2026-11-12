@@ -73,7 +73,7 @@ from si_ranking import cache as CACHE  # noqa: E402
 from si_ranking import plantdate as PD  # noqa: E402
 
 # ============================================================================ page + theme
-st.set_page_config(page_title="FieldRank", page_icon="🌱", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="FieldRank", page_icon="🌱", layout="wide", initial_sidebar_state="auto")
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
@@ -96,6 +96,7 @@ section[data-testid="stSidebar"] .block-container { padding-top:1rem; }
 .sb-brand b { font-size:1.08rem; letter-spacing:-.01em; }
 .sb-h { font-size:.7rem; font-weight:700; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); margin:1.1rem 0 .35rem; }
 .sb-note { color:var(--muted); font-size:.78rem; margin:.15rem 0 .4rem; }
+.footer { margin:2.2rem 0 .5rem; padding:1rem 0 0; border-top:1px solid var(--line, #e2e8f0); color:var(--muted); font-size:.76rem; line-height:1.5; display:grid; gap:.35rem; }
 .stButton > button, .stDownloadButton > button, div[data-testid="stPopover"] > div > button {
   border-radius:999px !important; font-weight:600; padding:.45rem 1.05rem; border:1px solid var(--line); background:#fff; color:var(--ink); }
 .stButton > button[kind="primary"] { background:var(--ink); color:#fff; border:none; box-shadow:0 6px 16px rgba(15,23,42,.18); }
@@ -340,26 +341,29 @@ def picker_geojson(lon: float, lat: float, radius: float, season_year: int):
     return g.to_json()
 
 
+FIRST_SEASON = 2024   # oldest season offered: 2024 and 2025 have USDA crop labels; newer seasons use the 2025 labels
+
+
 # one click examples (2025 season — the crop labels in the field data are 2025).
 # Picked from the CSB field layer: labelled with that crop in 2025, 40–160 ac, in the densest same-crop
 # area of the state (lots of neighbours to compare with), ≥35 km from metro areas and ≥12 km from towns.
 # (field id, place, why, planting, check date)
 EXAMPLES = {
-    "cotton": [("131825005315166", "Dooly County · near Vienna", "488 cotton fields within 8 km · cotton every year since 2018",
+    "cotton": [("131825005315166", "Dooly County · near Vienna", "356 cotton fields within 7 km · cotton every year since 2018",
                 dt.date(2025, 5, 6), dt.date(2025, 7, 25)),
-               ("131825006961251", "Colquitt County · near Doerun", "336 cotton fields within 8 km · continuous cotton",
+               ("131825006961251", "Colquitt County · near Doerun", "240 cotton fields within 7 km · continuous cotton",
                 dt.date(2025, 5, 8), dt.date(2025, 7, 28))],
-    "peanut": [("131825012170614", "Early County · near Donalsonville", "340 peanut fields within 8 km · peanut–cotton rotation",
+    "peanut": [("131825012170614", "Early County · near Donalsonville", "271 peanut fields within 7 km · peanut–cotton rotation",
                 dt.date(2025, 5, 8), dt.date(2025, 7, 30)),
-               ("131825006455896", "Irwin County · near Ocilla", "328 peanut fields within 8 km · peanut–cotton rotation",
+               ("131825006455896", "Irwin County · near Ocilla", "241 peanut fields within 7 km · peanut–cotton rotation",
                 dt.date(2025, 5, 10), dt.date(2025, 8, 1))],
-    "corn": [("131825011700184", "Terrell County · near Dawson", "217 corn fields within 8 km · mostly corn since 2018",
+    "corn": [("131825011700184", "Terrell County · near Dawson", "158 corn fields within 7 km · mostly corn since 2018",
               dt.date(2025, 3, 25), dt.date(2025, 6, 12)),
-             ("131825006455913", "Irwin County · near Ocilla", "230 corn fields within 8 km · corn after peanut/cotton",
+             ("131825006455913", "Irwin County · near Ocilla", "189 corn fields within 7 km · corn after peanut/cotton",
               dt.date(2025, 3, 28), dt.date(2025, 6, 15))],
-    "soybean": [("131825005794950", "Randolph County · near Cuthbert", "86 soybean fields within 8 km (soybean is sparse in GA)",
+    "soybean": [("131825005794950", "Randolph County · near Cuthbert", "96 soybean fields within 7 km (soybean is sparse in GA)",
                  dt.date(2025, 5, 28), dt.date(2025, 8, 12)),
-                ("131825012399872", "Brooks County · near Quitman", "85 soybean fields within 8 km",
+                ("131825012399872", "Brooks County · near Quitman", "71 soybean fields within 7 km",
                  dt.date(2025, 5, 28), dt.date(2025, 8, 12))],
 }
 
@@ -490,7 +494,12 @@ with st.sidebar:
             html(f'<div class="sb-note">{_w}. Planted ≈ {_pl:%b %d} · checked {_ck:%b %d, %Y} (2025 season).</div>')
             st.button(f"Load this {crop} field", key=f"ex_load_{crop}", use_container_width=True, on_click=load_example, args=(crop, _i))
     ss.setdefault("planting", dt.date(dt.date.today().year, 5, 5)); ss.setdefault("radius", 7)
-    planting = st.date_input("Planting date", key="planting")
+    _pmin, _pmax = dt.date(FIRST_SEASON, 1, 1), dt.date(dt.date.today().year, 12, 31)
+    if not (_pmin <= ss["planting"] <= _pmax):
+        ss["planting"] = min(max(ss["planting"], _pmin), _pmax)
+    planting = st.date_input("Planting date", key="planting", min_value=_pmin, max_value=_pmax,
+                             help=f"Seasons {FIRST_SEASON}–{dt.date.today().year}. Past seasons compare against the fields that grew "
+                                  "your crop that year (USDA crop labels).")
     LBL_YEAR, LBL_COL = STORE.label_year(planting.year)
     LBL_YEAR = LBL_YEAR or 2025
     if planting.year > LBL_YEAR:
@@ -503,25 +512,30 @@ with st.sidebar:
                        help="Every field of your crop inside this circle is compared. Bigger = more fields, a bit slower.")
     process = st.button("Find comparable fields", type="primary", use_container_width=True) or bool(ss.pop("auto_process", False))
 
-    html('<div class="sb-h">Compare only with fields that have…</div>')
-    st.toggle("Similar planting", value=True, disabled=True, help="Always on: estimated planting date within ± the days below of mine")
-    window = st.slider("Planting within ± days of mine", 3, 14, C.PLANTING_WINDOW_DAYS, key="plant_window",
-                       help="Fields whose estimated planting date is this close to the date you entered. ±10 days keeps crop stage and size alike; narrow it for a stricter match.")
-    _pt = ss["result"]["table"] if "result" in ss else None
-    _pc = (_pt.loc[_pt["field_id"] != "MY_FIELD", "plant_conf"].value_counts().to_dict() if _pt is not None and "plant_conf" in _pt else {})
-    _plab = {"High confidence": "Well dated only" + (f" · {_pc.get('high', 0)}" if _pc else ""),
-             "All estimated": "+ roughly dated" + (f" · {_pc.get('high', 0) + _pc.get('low', 0)}" if _pc else "")}
-    plant_mode = segmented("Which planting dates to use", ["High confidence", "All estimated"], "High confidence", "plant_mode",
-                           format_func=lambda k: _plab.get(k, k))
-    html('<div class="sb-note" style="margin-top:-.2rem">' + ("<b>Well dated</b>: the satellite saw the crop come up clearly — NDVI and EVI2 agree and "
-         "clear images bracket it — so the planting date is good to about a week."
-         if plant_mode == "High confidence" else "Adds <b>roughly dated</b> fields: green-up seen but blurred by clouds or a weak signal, "
-         "so the date could be off by 1–2 weeks. More fields, less exact.") + '</div>')
-    t_irr = st.toggle("Same irrigation", value=False,
-                      help="Irrigated vs dryland — LANID 2015–17 + pivot shape" if lanid_layers() else "Irrigated vs dryland — pivot shape only (LANID not installed)")
-    t_elev = st.toggle("Similar elevation", value=False, help="Field median elevation within half the local inter-quartile range (3–10 m) of mine")
-    t_soil = st.toggle("Similar soil texture", value=False, help="Same USDA texture group, 0–30 cm: coarse · moderately coarse · medium · moderately fine · fine")
-    html('<div class="sb-note">Filters apply instantly — no re-processing.</div>')
+    if "result" in ss:
+        html('<div class="sb-h">Compare only with fields that have…</div>')
+        st.toggle("Similar planting", value=True, disabled=True, help="Always on: estimated planting date within ± the days below of mine")
+        window = st.slider("Planting within ± days of mine", 3, 14, C.PLANTING_WINDOW_DAYS, key="plant_window",
+                           help="Fields whose estimated planting date is this close to the date you entered. ±10 days keeps crop stage and size alike; narrow it for a stricter match.")
+        _pt = ss["result"]["table"] if "result" in ss else None
+        _pc = (_pt.loc[_pt["field_id"] != "MY_FIELD", "plant_conf"].value_counts().to_dict() if _pt is not None and "plant_conf" in _pt else {})
+        _plab = {"High confidence": "Well dated only" + (f" · {_pc.get('high', 0)}" if _pc else ""),
+                 "All estimated": "+ roughly dated" + (f" · {_pc.get('high', 0) + _pc.get('low', 0)}" if _pc else "")}
+        plant_mode = segmented("Which planting dates to use", ["High confidence", "All estimated"], "High confidence", "plant_mode",
+                               format_func=lambda k: _plab.get(k, k))
+        html('<div class="sb-note" style="margin-top:-.2rem">' + ("<b>Well dated</b>: the satellite saw the crop come up clearly — NDVI and EVI2 agree and "
+             "clear images bracket it — so the planting date is good to about a week."
+             if plant_mode == "High confidence" else "Adds <b>roughly dated</b> fields: green-up seen but blurred by clouds or a weak signal, "
+             "so the date could be off by 1–2 weeks. More fields, less exact.") + '</div>')
+        t_irr = st.toggle("Same irrigation", value=False,
+                          help="Irrigated vs dryland — LANID 2015–17 + pivot shape" if lanid_layers() else "Irrigated vs dryland — pivot shape only (LANID not installed)")
+        t_elev = st.toggle("Similar elevation", value=False, help="Field median elevation within half the local inter-quartile range (3–10 m) of mine")
+        t_soil = st.toggle("Similar soil texture", value=False, help="Same USDA texture group, 0–30 cm: coarse · moderately coarse · medium · moderately fine · fine")
+        html('<div class="sb-note">Filters apply instantly — no re-processing.</div>')
+    else:                                              # nothing to filter yet — defaults until the first search is done
+        window, plant_mode, t_irr, t_elev, t_soil = ss.get("plant_window", C.PLANTING_WINDOW_DAYS), (ss.get("plant_mode") or "High confidence"), False, False, False
+        html('<div class="sb-note" style="margin-top:.8rem">After the search, filters appear here — planting window, irrigation, '
+             'elevation, soil — and apply instantly.</div>')
 
     with st.expander("Advanced"):
         allow_l = st.toggle("Add Landsat when Sentinel-2 is cloudy", value=True)
@@ -537,6 +551,15 @@ with st.sidebar:
             st.toast(f"Cleared {freed:.0f} MB of cached imagery.", icon="🧹")
     if "result" in ss and st.button("↺ Start over with a new field", use_container_width=True):
         reset_results(); ss.pop("check_date", None); ss.pop("example", None); st.rerun()
+
+def footer():
+    """Data sources, how to cite and the usual caveat — on every page."""
+    html('<div class="footer"><div><b>FieldRank</b> · decision support for Georgia corn, cotton, peanut and soybean. It shows <i>where</i> to scout, '
+         'not <i>why</i> a field is behind — a field visit tells you the cause. Not a yield estimate and not agronomic advice.</div>'
+         '<div>Data: USDA NASS Crop Sequence Boundaries &amp; Cropland Data Layer (field boundaries and crops) · ESA Copernicus Sentinel-2 '
+         '(10 m, via Element 84 Earth Search) · NASA/USGS Landsat 8–9 (green-up only) · Open-Meteo weather · USDA SSURGO soils · '
+         'Copernicus GLO-30 elevation · LANID irrigation. Imagery © ESA / USGS; basemap Esri, Maxar.</div></div>')
+
 
 lat0, lon0 = ss.center
 has_field = ss.geom is not None
@@ -589,6 +612,21 @@ def run_heavy(_show, fn, *a, **k):
     finally:
         gate.release()
         free_memory()
+
+
+OUTAGE_MSG = ("The satellite image service (Element 84 Earth Search on AWS) did not answer. This is usually a short outage on their side — "
+              "nothing is wrong with your field or settings. Please try again in a few minutes; everything already read is kept.")
+
+
+def outage(status, what: str, e: Exception):
+    """Show a calm, plain message instead of a traceback when an outside service is down."""
+    try:
+        status.update(label=f"Could not {what}", state="error", expanded=False)
+    except Exception:
+        pass
+    st.warning(f"**Could not {what}.** {OUTAGE_MSG}", icon="🛰️")
+    with st.expander("Technical detail"):
+        st.code(f"{type(e).__name__}: {str(e)[:400]}")
 
 
 def _stopped():
@@ -851,7 +889,12 @@ if process:
     pool = ThreadPoolExecutor(max_workers=1)
     ss._cancel_evt = threading.Event()                 # set by ■ Stop → the background profile job stops too
     fut_prof = pool.submit(field_profiles, allf, lambda s: None, None, 3, True, ss._cancel_evt)
-    coh, info, gts = run_heavy(prog, planting_cohort, allf, "MY_FIELD", planting, window, log=lambda s: None, progress=prog, allow_landsat=allow_l)
+    try:
+        coh, info, gts = run_heavy(prog, planting_cohort, allf, "MY_FIELD", planting, window, log=lambda s: None, progress=prog, allow_landsat=allow_l)
+    except Exception as e:
+        ss._cancel_evt.set(); pool.shutdown(wait=False)
+        outage(status, "read the satellite images", e)
+        st.stop()
     sc = info["status_counts"]
     step(f"**Green-up** — {info['n_scenes']} clear Sentinel-2 dates" + (f" + {info['n_landsat']} Landsat" if info["n_landsat"] else "") +
          f" · seen on {sc.get('crossing', 0)} fields · mine on {info['anchor_greenup']} ({info['target_conf_label']} confidence)")
@@ -890,6 +933,7 @@ if process:
     st.rerun()
 
 if not has_result:
+    footer()
     st.stop()
 
 # ============================================================================ results: live filtering
@@ -1007,7 +1051,11 @@ if ss.get("season_request"):
         t0 = dt.datetime.now()
         sub = allf[allf["field_id"].isin(todo)].reset_index(drop=True)
         status, step, prog, done = status_panel(f"Reading the season {rkey[0]} → {rkey[1]} for {len(sub)} field{'s' if len(sub) != 1 else ''}…")
-        S_, n_found, n_used = run_heavy(prog, season_series, sub, pd.Timestamp(rkey[0]).date(), pd.Timestamp(rkey[1]).date(), progress=prog, log=lambda s_: None)
+        try:
+            S_, n_found, n_used = run_heavy(prog, season_series, sub, pd.Timestamp(rkey[0]).date(), pd.Timestamp(rkey[1]).date(), progress=prog, log=lambda s_: None)
+        except Exception as e:
+            outage(status, "read the season's images", e)
+            S_, n_found, n_used = pd.DataFrame(), 0, 0
         merged = pd.concat([have, S_], ignore_index=True) if have is not None and len(have) else S_
         ss.season_cache[rkey] = merged
         for k_ in list(ss.season_cache)[:-2]:           # keep the last 2 season ranges per visitor
@@ -1059,7 +1107,7 @@ if want_now and now_missing and st_today.key != "pre":
              f"{(dt.datetime.now() - t0).total_seconds():.0f} s")
     except Exception as e:  # network down etc. — never break the page, and don't retry on every rerun
         ss.setdefault("now_failed", {})[now_key] = True
-        done(f"Could not read the images ({type(e).__name__}) — press Update to try again")
+        outage(status, "read the images for this date", e)
     ss.pop("rank_bars", None)
     now_have = ss.now_cache.get(now_key)
 
@@ -1532,31 +1580,32 @@ with tab_det:
                     html(f'<div class="wbox" style="margin-top:.3rem"><div class="lab">★ Yield-critical stage</div>'
                          f'<div class="val" style="font-size:1.2rem">{"starts " + start_.strftime("%b %d") if NOW_ASOF < start_ else "no clear look yet"}</div>'
                          f'<div class="sub">{cw_.label} · the part of the season most tied to yield</div></div>')
-        with card():
-            html('<div class="ctitle">How the answer is decided</div><div class="csub">the same rules for every field</div>'
-                 '<div style="margin-top:.5rem"></div>' + why_rows([
-                     ("🔎", "<b>Scout this field</b> — under 70% of the best fields · or under 85% <i>and</i> behind on 2 of the last 3 images or "
-                            "slipping 5+ points · or under 80% during the ★ yield-critical stage"),
-                     ("👀", "<b>Keep an eye on it</b> — under 85% on one image · or under 95% and slipping · or among the least green quarter of "
-                            "the comparable fields"),
-                     ("✅", "<b>On track</b> — everything else. Late season and harvested fields get information, not a scouting call — "
-                            "greenness falls there for normal reasons.")]) +
-                 f'<div class="note">Index: {VI_TAG} — {G.VI_HELP.get(VI, "")}. Reference = the q{int(q * 100)} (top {100 - q * 100:.0f} %) of the other '
-                 'comparable fields. Stages are typical Georgia timings counted from planting — approximate.</div>')
-        if MYC is not None and pd.notna(MYC["cons_score"]):
+        with st.expander("How the answer is decided · second opinion from all indices", expanded=False):
             with card():
-                html(f'<div class="ctitle">Second opinion · all {int(MYC["n_vi"])} indices on {IMG_DATE:%b %d}</div>'
-                     f'<div class="csub">my field ranked on every index with the same image and the same comparable fields · bigger dot = more weight '
-                     f'for {R["crop"]} at this stage ({RANK_STAGE.label if RANK_STAGE else "—"}) · blue = ★ {VI} · purple line = ◎ consensus score '
-                     f'{MYC["cons_score"]:.0f} → <b>#{int(MYC["cons_rank"])} of {N_CONS}</b></div>')
-                index_strip()
-                if AGREE:
-                    html(f'<div class="note">{AGREE["n_bottom_half"]} of {AGREE["n"]} indices put my field in the bottom half '
-                         f'({AGREE["w_bottom_half"] * 100:.0f}% of the weight) · best on <b>{AGREE["best_vi"]}</b> (#{AGREE["best_rank"]}), '
-                         f'weakest on <b>{AGREE["worst_vi"]}</b> (#{AGREE["worst_rank"]}). Ranks are combined, not SI values — each index spreads '
-                         f'fields differently (NDVI bunches up in dense canopies, CIre stretches them). Choose <b>◎ Consensus</b> in Map & ranking '
-                         f'to rank every field this way.</div>')
-        with st.expander("New here? How to read this check", expanded=True):
+                html('<div class="ctitle">How the answer is decided</div><div class="csub">the same rules for every field</div>'
+                     '<div style="margin-top:.5rem"></div>' + why_rows([
+                         ("🔎", "<b>Scout this field</b> — under 70% of the best fields · or under 85% <i>and</i> behind on 2 of the last 3 images or "
+                                "slipping 5+ points · or under 80% during the ★ yield-critical stage"),
+                         ("👀", "<b>Keep an eye on it</b> — under 85% on one image · or under 95% and slipping · or among the least green quarter of "
+                                "the comparable fields"),
+                         ("✅", "<b>On track</b> — everything else. Late season and harvested fields get information, not a scouting call — "
+                                "greenness falls there for normal reasons.")]) +
+                     f'<div class="note">Index: {VI_TAG} — {G.VI_HELP.get(VI, "")}. Reference = the q{int(q * 100)} (top {100 - q * 100:.0f} %) of the other '
+                     'comparable fields. Stages are typical Georgia timings counted from planting — approximate.</div>')
+            if MYC is not None and pd.notna(MYC["cons_score"]):
+                with card():
+                    html(f'<div class="ctitle">Second opinion · all {int(MYC["n_vi"])} indices on {IMG_DATE:%b %d}</div>'
+                         f'<div class="csub">my field ranked on every index with the same image and the same comparable fields · bigger dot = more weight '
+                         f'for {R["crop"]} at this stage ({RANK_STAGE.label if RANK_STAGE else "—"}) · blue = ★ {VI} · purple line = ◎ consensus score '
+                         f'{MYC["cons_score"]:.0f} → <b>#{int(MYC["cons_rank"])} of {N_CONS}</b></div>')
+                    index_strip()
+                    if AGREE:
+                        html(f'<div class="note">{AGREE["n_bottom_half"]} of {AGREE["n"]} indices put my field in the bottom half '
+                             f'({AGREE["w_bottom_half"] * 100:.0f}% of the weight) · best on <b>{AGREE["best_vi"]}</b> (#{AGREE["best_rank"]}), '
+                             f'weakest on <b>{AGREE["worst_vi"]}</b> (#{AGREE["worst_rank"]}). Ranks are combined, not SI values — each index spreads '
+                             f'fields differently (NDVI bunches up in dense canopies, CIre stretches them). Choose <b>◎ Consensus</b> in Map & ranking '
+                             f'to rank every field this way.</div>')
+        with st.expander("New here? How to read this check", expanded=False):
             st.markdown(
                 "- **Comparable fields** are the same crop, planted within a few days of mine, close by — plus any filters switched on in the sidebar "
                 "(elevation, soil, irrigation). Comparing with them removes weather and planting-date differences.\n"
@@ -2073,3 +2122,5 @@ with tab_d, card():
                                 "acres": st.column_config.NumberColumn(format="%.0f"), "SI": st.column_config.NumberColumn(format="%.2f"),
                                 "elevation m": st.column_config.NumberColumn(format="%.0f"), "rank": st.column_config.NumberColumn(format="%d")})
     st.download_button("Download CSV", D.to_csv(index=False).encode(), "fieldrank.csv", "text/csv")
+
+footer()

@@ -200,15 +200,22 @@ def build_tiles(src: Path | str | gpd.GeoDataFrame | None = None, out_dir: Path 
     return out_dir
 
 
+def _shrink(ga: gpd.GeoSeries, d: float) -> gpd.GeoSeries:
+    """Inward buffer by d metres (works with every geopandas/shapely 2 version)."""
+    import shapely
+    return gpd.GeoSeries(shapely.buffer(np.asarray(ga.values), -d, quad_segs=2),
+                         index=ga.index, crs=ga.crs)
+
+
 def inner_buffer(ga: gpd.GeoSeries) -> gpd.GeoSeries:
     """Shrink fields (equal-area CRS) so edge pixels — tree lines, roads, ditches, mixed border pixels — never enter the median.
     30 m inward by default; small or narrow fields that would lose most of their area fall back to 20 m, then 10 m."""
-    out = ga.buffer(-C.INWARD_BUFFER_M, quad_segs=2)
+    out = _shrink(ga, C.INWARD_BUFFER_M)
     bad = out.is_empty | (out.area < 0.30 * ga.area)
     for d_, keep in ((20.0, 0.20), (10.0, 0.0)):
         if not bad.any():
             break
-        alt_ = ga[bad].buffer(-d_, quad_segs=2)
+        alt_ = _shrink(ga[bad], d_)
         out[bad] = alt_
         bad = out.is_empty | (out.area <= keep * ga.area)
     return out
