@@ -46,7 +46,7 @@ def usage() -> dict:
 
 def _obsolete_dirs():
     from .scenes import ENGINE_VERSION
-    live = {f"{ENGINE_VERSION}_{k}" for k in ("ndvi_evi2", C.VI_KIND, "l89vi2h")}
+    live = {f"{ENGINE_VERSION}_{k}" for k in ("ndvi_evi2", C.VI_KIND, "l89vi2h", "hls2vi")}
     d = ROOT / "scenes"
     return [p for p in d.iterdir() if p.is_dir() and p.name not in live] if d.exists() else []
 

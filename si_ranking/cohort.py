@@ -30,7 +30,7 @@ import pandas as pd
 from . import config as C
 from .imagery import _rasterize_fields, _zonal  # noqa: F401  (Landsat tier)
 
-CACHE_VERSION = "v9-landsat-harmonized"   # bump when detector/search changes -> old caches ignored
+CACHE_VERSION = "v10-hls"   # bump when detector/search changes -> old caches ignored
 GREENUP_DELTA = 0.10           # rise above bare-soil baseline that marks green-up
 GREENUP_CONFIRM_ABS = 0.28     # canopy must reach this NDVI ...
 GREENUP_CONFIRM_REL = 0.15     # ... and baseline + this, to count as a real crop
@@ -88,6 +88,27 @@ def _s2_series(fields, planting, days_before, days_after, log, progress):
                        "evi2": pd.to_numeric(df.get("evi2"), errors="coerce"),
                        "n_pix": pd.to_numeric(df["n_pix"], errors="coerce").fillna(0).astype(int), "sensor": "S2"}, columns=TS_COLS)
     return ts, used
+
+
+# ----------------------------------------------------------------------------- tier 0: HLS (main source)
+USE_HLS = True
+
+
+def _hls_series(fields, planting, days_before, days_after, log, progress):
+    """Green-up looks from HLS v2 — Sentinel-2 + Landsat already harmonised by NASA on one 30 m grid (~1.6-day revisit).
+    Returns (ts, n_s30_dates, n_l30_dates); raises when the service can't be reached (caller falls back to Sentinel-2)."""
+    from . import scenes
+    import planetary_computer  # noqa: F401
+    start = planting - dt.timedelta(days=days_before)
+    end = min(planting + dt.timedelta(days=days_after), dt.date.today())
+    df, n_found, used = scenes.hls_series(fields, start, end, progress=progress, log=log)
+    if n_found == 0:
+        raise RuntimeError("HLS: no granules found")
+    ts = pd.DataFrame({"field_id": df["field_id"], "date": pd.to_datetime(df["date"]), "ndvi": df["ndvi"], "evi2": df["evi2"],
+                       "n_pix": pd.to_numeric(df["n_pix"], errors="coerce").fillna(0).astype(int), "sensor": df["sensor"]}, columns=TS_COLS)
+    n_s = int(ts.loc[ts["sensor"] == "S30", "date"].nunique()); n_l = int(ts.loc[ts["sensor"] == "L30", "date"].nunique())
+    log(f"HLS: {n_found} granules, {used} with data · {n_s} Sentinel-2 + {n_l} Landsat dates")
+    return ts, n_s, n_l
 
 
 # ----------------------------------------------------------------------------- tier 2: Landsat 8/9
@@ -319,20 +340,31 @@ def planting_cohort(fields: gpd.GeoDataFrame, target_id: str, planting: dt.date,
     progress = progress or (lambda f, m: None)
     key = _cache_key(fields, planting)
     p = C.TS_DIR / f"greenup_{key}.parquet"
+    source = "Sentinel-2"
     if use_cache and p.exists():
         ts = pd.read_parquet(p)
         if "sensor" not in ts:
             ts["sensor"] = "S2"
-        n_s2 = int(ts.loc[ts["sensor"] == "S2", "date"].nunique()); n_l = int(ts.loc[ts["sensor"] == "L89", "date"].nunique())
+        hls_ = ts["sensor"].isin(["S30", "L30"]).any()
+        source = "HLS" if hls_ else source
+        n_s2 = int(ts.loc[ts["sensor"].isin(["S2", "S30"]), "date"].nunique()); n_l = int(ts.loc[ts["sensor"].isin(["L89", "L30"]), "date"].nunique())
         progress(1.0, "Loaded green-up series from cache"); log(f"cache: {p.name}")
     else:
-        ts, n_s2 = _s2_series(fields, planting, days_before, days_after, log, progress); n_l = 0
-    progress(0.96, "Detecting green-up (Sentinel-2)…")
+        ts = None
+        if USE_HLS and allow_landsat:
+            try:
+                ts, n_s2, n_l = _hls_series(fields, planting, days_before, days_after, log, progress)
+                source = "HLS"
+            except Exception as e:                                 # service down / not installed → native Sentinel-2
+                log(f"HLS unavailable ({type(e).__name__}: {e}) — using Sentinel-2"); ts = None
+        if ts is None:
+            ts, n_s2 = _s2_series(fields, planting, days_before, days_after, log, progress); n_l = 0
+    progress(0.96, f"Detecting green-up ({'HLS: Sentinel-2 + Landsat' if source == 'HLS' else 'Sentinel-2'})…")
     det = _detect_all(ts, fields, planting)
     tgt = det[det["field_id"] == target_id].iloc[0]
     coverage = float(det["greenup_date"].notna().mean())
     tgt_missing = tgt["greenup_date"] is None or pd.isna(tgt["greenup_date"])
-    need_l = allow_landsat and n_l == 0 and (tgt_missing or coverage < COVERAGE_TRIGGER or
+    need_l = allow_landsat and source != "HLS" and n_l == 0 and (tgt_missing or coverage < COVERAGE_TRIGGER or
                                              (pd.notna(tgt["gap_days"]) and tgt["gap_days"] > GAP_TRIGGER))
     tier2_reason = ""; ls_cal = {}
     if need_l:
@@ -367,7 +399,7 @@ def planting_cohort(fields: gpd.GeoDataFrame, target_id: str, planting: dt.date,
         det["in_window"] = det["in_window"] & (det["irrigated"].eq(mine) | det["field_id"].eq(target_id))
     det["ref_ok"] = det["in_window"] & (det["confidence"] >= CONF_MED)
     info = {"anchor_greenup": anchor, "anchor_source": anchor_src, "anchor_observed": bool(anchor_obs), "n_scenes": int(n_s2), "n_landsat": int(n_l),
-            "tier2": bool(need_l), "tier2_reason": tier2_reason, "landsat_cal": ls_cal,
+            "tier2": bool(need_l), "tier2_reason": tier2_reason, "landsat_cal": ls_cal, "source": source,
             "n_detected": int(det["greenup_date"].notna().sum()), "n_in_window": int(det["in_window"].sum()),
             "n_high": int((det["conf_label"] == "high").sum()), "n_medium": int((det["conf_label"] == "medium").sum()),
             "n_low": int((det["conf_label"] == "low").sum()),

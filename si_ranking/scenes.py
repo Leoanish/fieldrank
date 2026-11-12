@@ -613,3 +613,147 @@ def landsat_series(fields, start: dt.date, end: dt.date, workers: int | None = N
     df = pd.concat(out, ignore_index=True).reindex(columns=cols) if out else pd.DataFrame(columns=cols)
     df = _numeric(df, ["ndvi", "evi2", "n_pix"])
     return df, len(items), used
+
+
+# ============================================================================ HLS v2 (green-up / planting dates)
+# NASA Harmonized Landsat Sentinel-2: Sentinel-2A/B/C (S30) and Landsat 8/9 (L30) put on ONE 30 m grid with one
+# atmospheric correction, BRDF normalisation and bandpass adjustment — a clear look every ~1.6 days with no
+# sensor jumps, which is what a smooth green-up curve needs. Read from Planetary Computer (no login needed).
+# Ranking keeps native 10 m Sentinel-2 (more pixels per field, red-edge bands, same-day latency).
+HLS_COLLECTIONS = {"hls2-s30": ("B04", "B8A"), "hls2-l30": ("B04", "B05")}     # red, NIR narrow (harmonised pair)
+HLS_SENSOR = {"hls2-s30": "S30", "hls2-l30": "L30"}
+HLS_KIND = "hls2vi"            # cache: NDVI + EVI2 per field per HLS granule
+HLS_SCALE = 0.0001             # reflectance = DN · 0.0001, fill -9999
+
+
+def _hls_collection(item) -> str:
+    c = getattr(item, "collection_id", None) or ""
+    if c in HLS_COLLECTIONS:
+        return c
+    return "hls2-l30" if ".L30." in item.id else "hls2-s30"
+
+
+def _hls_searcher(b, s_, e_):
+    items = list(_pc_client().search(collections=list(HLS_COLLECTIONS), bbox=b, datetime=f"{s_}/{e_}").items())
+    return sorted(items, key=lambda it: it.datetime)
+
+
+def _hls_load(item, bbox, bands, res):
+    import odc.stac
+    import planetary_computer as pc
+    ds = odc.stac.load([item], bands=bands, bbox=bbox, resolution=res, chunks=None, groupby="solar_day",
+                       resampling={"Fmask": "nearest"}, fail_on_error=True, patch_url=pc.sign, pool=min(3, len(bands)))
+    return ds.isel(time=0)
+
+
+def _hls_clear(fm: np.ndarray) -> np.ndarray:
+    """Fmask v2 bits: 1 cloud · 2 next to cloud/shadow · 3 cloud shadow · 4 snow/ice · 5 water; 255 = fill."""
+    f = np.nan_to_num(np.asarray(fm, dtype="float64"), nan=255.0).astype("uint16")
+    bad = (f >> 1) & 0b11111
+    return (f != 255) & (bad == 0)
+
+
+def _hls_scene(item, ids, bbox, labels: _LabelStore, min_pix: int, mine: np.ndarray | None = None):
+    """`mine` = indices of the fields this granule is responsible for (each field is read from ONE tile per look)."""
+    from .imagery import _zonal
+    cols = ["cache_id", "n_pix", "ndvi", "evi2"]
+    mine = np.arange(len(ids)) if mine is None else mine
+    if len(mine) == 0:
+        return pd.DataFrame(columns=cols), "cached", np.nan
+    cached = _read_cache(HLS_KIND, item.id)
+    have = cached[cached["cache_id"].isin(ids[mine])] if cached is not None else pd.DataFrame(columns=cols)
+    todo = mine[~np.isin(ids[mine], have["cache_id"].values)]
+    if len(todo) == 0:
+        return have, "cached", np.nan
+    n = len(ids)
+    red_b, nir_b = HLS_COLLECTIONS[_hls_collection(item)]
+    dm = _hls_load(item, labels.bounds(todo) or bbox, ["Fmask"], 30)  # 1 byte / pixel, only around this granule's fields
+    lab = labels.get(dm, all_touched=True)
+    fm = dm["Fmask"].values
+    foot = np.nan_to_num(np.asarray(fm, dtype="float64"), nan=255.0) != 255
+    lp = np.where(np.isin(lab, todo + 1) & foot, lab, 0).ravel()
+    tot = np.bincount(lp, minlength=n + 1)
+    clr = np.bincount(lp, weights=_hls_clear(fm).ravel().astype("float64"), minlength=n + 1)
+    frac = float(clr[1:].sum() / max(tot[1:].sum(), 1))
+    worth = (tot[todo + 1] > 0) & (clr[todo + 1] / np.maximum(tot[todo + 1], 1) >= 0.3)
+    new = pd.DataFrame({"cache_id": ids[todo], "n_pix": 0, "ndvi": np.nan, "evi2": np.nan})
+    if not worth.any():
+        _write_cache(HLS_KIND, item.id, new)
+        return pd.concat([have, new], ignore_index=True), "cloudy", frac
+    med = np.full(n, np.nan); med2 = np.full(n, np.nan); cnt = np.zeros(n, int)
+    for grp in labels.windows(todo[worth], 30, C.MAX_WINDOW_PX):
+        ds = _hls_load(item, labels.bounds(grp), ["Fmask", red_b, nir_b], 30)
+        lab = labels.get(ds, subset=grp)
+        keep = (lab > 0) & _hls_clear(ds["Fmask"].values)
+        lab1 = lab[keep]
+        R = ds[red_b].values[keep].astype("float32") * HLS_SCALE
+        N = ds[nir_b].values[keep].astype("float32") * HLS_SCALE
+        del ds, keep, lab
+        ok_ = (R > 0) & (N > 0) & (R < 1) & (N < 1)
+        md, _, _, c = _zonal((N - R) / (N + R + 1e-6), lab1, n, ok_)
+        md2, _, _, _ = _zonal(2.5 * (N - R) / (N + 2.4 * R + 1.0), lab1, n, ok_)
+        g_ = c > 0
+        med[g_], med2[g_], cnt[g_] = md[g_], md2[g_], c[g_]
+    ok = cnt[todo] >= max(min_pix // 9, 6)
+    new["n_pix"] = cnt[todo].astype(int)
+    new["ndvi"] = np.where(ok, med[todo], np.nan)
+    new["evi2"] = np.where(ok, med2[todo], np.nan)
+    _write_cache(HLS_KIND, item.id, new)
+    return pd.concat([have, new], ignore_index=True), "read", frac
+
+
+def hls_series(fields, start: dt.date, end: dt.date, workers: int | None = None, progress=None, log=print):
+    """NDVI + EVI2 of every clear HLS look (Sentinel-2 S30 + Landsat L30, one harmonised 30 m product) of `fields`.
+    Returns (DataFrame[field_id, date, ndvi, evi2, n_pix, sensor], granules_found, granules_with_data)."""
+    progress = progress or (lambda f, m: None)
+    workers = workers or C.WORKERS
+    bbox = tuple(fields.total_bounds)
+    ids = cache_ids(fields)
+    m = dict(zip(ids, fields["field_id"].astype(str).values))
+    progress(0.0, "HLS (Sentinel-2 + Landsat, harmonised) · searching…")
+    items = _search(bbox, start.isoformat(), end.isoformat(), collection="hls2", searcher=_hls_searcher,
+                    tile_of=lambda it: f"{_hls_collection(it)}_{it.id.split('.')[2] if it.id.count('.') >= 3 else it.id}")
+    labels = _LabelStore(fields["geometry_inner"])
+    # neighbouring MGRS tiles overlap: give every field to ONE granule per look (the tile holding most of the fields),
+    # so overlap areas are not read twice
+    from shapely.geometry import shape
+    import shapely
+    pts = shapely.points(fields["lon"].values, fields["lat"].values) if {"lon", "lat"} <= set(fields.columns) else \
+        shapely.points(np.c_[fields.geometry.centroid.x.values, fields.geometry.centroid.y.values])
+    groups: dict = {}
+    for it in items:
+        groups.setdefault((_hls_collection(it), pd.Timestamp(it.datetime).date()), []).append(it)
+    assign: dict = {}
+    for _, its in groups.items():
+        inside = [shapely.contains_xy(shape(it.geometry), shapely.get_x(pts), shapely.get_y(pts)) if getattr(it, "geometry", None)
+                  else np.ones(len(ids), bool) for it in its]
+        order = np.argsort([-int(m_.sum()) for m_ in inside])
+        taken = np.zeros(len(ids), bool)
+        for k in order:
+            sel = inside[k] & ~taken
+            assign[its[k].id] = np.flatnonzero(sel); taken |= sel
+    items = [it for it in items if len(assign.get(it.id, [])) > 0]
+    progress(0.02, f"HLS · {len(items)} looks · Sentinel-2 + Landsat · {workers} at a time")
+    out, used = [], 0
+    ex = ThreadPoolExecutor(max_workers=workers)
+    try:
+        futs = {ex.submit(_hls_scene, it, ids, bbox, labels, C.MIN_PIXELS_10M, assign[it.id]): it for it in items}
+        for i, fu in enumerate(as_completed(futs)):
+            it = futs[fu]; date = pd.Timestamp(it.datetime).tz_localize(None).normalize() if pd.Timestamp(it.datetime).tzinfo else pd.Timestamp(it.datetime).normalize()
+            try:
+                df, status, frac = fu.result()
+            except Exception as e:
+                log(f"  skip {it.id}: {e}"); continue
+            good = df[pd.to_numeric(df["ndvi"], errors="coerce").notna()]
+            used += bool(len(good))
+            out.append(good.assign(field_id=good["cache_id"].map(m), date=date, sensor=HLS_SENSOR[_hls_collection(it)]))
+            tag = "from cache" if status == "cached" else (f"{frac:.0%} clear → skipped" if status == "cloudy" else f"{frac:.0%} clear")
+            progress(0.05 + 0.93 * (i + 1) / max(len(items), 1), f"HLS · {i + 1}/{len(items)} · {date.date()} · {tag} · {len(good)} fields")
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+    cols = ["field_id", "date", "ndvi", "evi2", "n_pix", "sensor"]
+    df = pd.concat(out, ignore_index=True).reindex(columns=cols) if out else pd.DataFrame(columns=cols)
+    df = _numeric(df, ["ndvi", "evi2", "n_pix"])
+    if len(df):     # a field seen on two overlapping tiles the same day: keep the look with the most clear pixels
+        df = df.sort_values("n_pix", ascending=False).drop_duplicates(["field_id", "date", "sensor"]).sort_values(["field_id", "date"])
+    return df.reset_index(drop=True), len(items), used

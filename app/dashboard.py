@@ -365,27 +365,27 @@ def picker_geojson(lon: float, lat: float, radius: float, season_year: int):
 FIRST_SEASON = 2024   # oldest season offered: 2024 and 2025 have USDA crop labels; newer seasons use the 2025 labels
 
 
-# one click examples (2025 season — the crop labels in the field data are 2025).
+# one click examples (2025 season; planting dates = what HLS green-up + local weather say, so the satellite confirms them — the crop labels in the field data are 2025).
 # Picked from the CSB field layer: labelled with that crop in 2025, 40–160 ac, in the densest same-crop
 # area of the state (lots of neighbours to compare with), ≥35 km from metro areas and ≥12 km from towns.
 # (field id, place, why, planting, check date)
 EXAMPLES = {
     "cotton": [("131825005315166", "Dooly County · near Vienna", "356 cotton fields within 7 km · cotton every year since 2018",
-                dt.date(2025, 5, 6), dt.date(2025, 7, 25)),
+                dt.date(2025, 6, 1), dt.date(2025, 8, 20)),
                ("131825006961251", "Colquitt County · near Doerun", "240 cotton fields within 7 km · continuous cotton",
-                dt.date(2025, 5, 8), dt.date(2025, 7, 28))],
+                dt.date(2025, 6, 11), dt.date(2025, 8, 31))],
     "peanut": [("131825012170614", "Early County · near Donalsonville", "271 peanut fields within 7 km · peanut–cotton rotation",
-                dt.date(2025, 5, 8), dt.date(2025, 7, 30)),
+                dt.date(2025, 5, 30), dt.date(2025, 8, 21)),
                ("131825006455896", "Irwin County · near Ocilla", "241 peanut fields within 7 km · peanut–cotton rotation",
-                dt.date(2025, 5, 10), dt.date(2025, 8, 1))],
+                dt.date(2025, 5, 6), dt.date(2025, 7, 28))],
     "corn": [("131825011700184", "Terrell County · near Dawson", "158 corn fields within 7 km · mostly corn since 2018",
-              dt.date(2025, 3, 25), dt.date(2025, 6, 12)),
+              dt.date(2025, 4, 2), dt.date(2025, 6, 20)),
              ("131825006455913", "Irwin County · near Ocilla", "189 corn fields within 7 km · corn after peanut/cotton",
-              dt.date(2025, 3, 28), dt.date(2025, 6, 15))],
+              dt.date(2025, 4, 8), dt.date(2025, 6, 26))],
     "soybean": [("131825005794950", "Randolph County · near Cuthbert", "96 soybean fields within 7 km (soybean is sparse in GA)",
-                 dt.date(2025, 5, 28), dt.date(2025, 8, 12)),
+                 dt.date(2025, 6, 10), dt.date(2025, 8, 25)),
                 ("131825012399872", "Brooks County · near Quitman", "71 soybean fields within 7 km",
-                 dt.date(2025, 5, 28), dt.date(2025, 8, 12))],
+                 dt.date(2025, 6, 11), dt.date(2025, 8, 26))],
 }
 
 
@@ -560,7 +560,9 @@ with st.sidebar:
              'elevation, soil — and apply instantly.</div>')
 
     with st.expander("Advanced"):
-        allow_l = st.toggle("Add Landsat when Sentinel-2 is cloudy", value=True)
+        allow_l = st.toggle("Green-up from HLS (Sentinel-2 + Landsat)", value=True,
+                            help="NASA's Harmonized Landsat Sentinel-2: both satellites on one 30 m grid, a look about every 1.6 days. "
+                                 "Off = native Sentinel-2 only (fewer looks in cloudy springs).")
         max_days = st.slider("Look back for a clear image (days)", 5, 60, 30)
         q = st.slider("Reference quantile", 0.80, 0.99, C.VIRTUAL_REF_QUANTILE, 0.01)
         CACHE.prune()                                   # keeps the imagery cache under its size budget (checks every 5 min)
@@ -579,7 +581,7 @@ def footer():
     html('<div class="footer"><div><b>FieldRank</b> · decision support for Georgia corn, cotton, peanut and soybean. It shows <i>where</i> to scout, '
          'not <i>why</i> a field is behind — a field visit tells you the cause. Not a yield estimate and not agronomic advice.</div>'
          '<div>Data: USDA NASS Crop Sequence Boundaries &amp; Cropland Data Layer (field boundaries and crops) · ESA Copernicus Sentinel-2 '
-         '(10 m, via Element 84 Earth Search) · NASA/USGS Landsat 8–9 (green-up only) · Open-Meteo weather · USDA SSURGO soils · '
+         '(10 m, via Element 84 Earth Search) · NASA HLS v2 Harmonized Landsat Sentinel-2 (green-up, via Microsoft Planetary Computer) · Open-Meteo weather · USDA SSURGO soils · '
          'Copernicus GLO-30 elevation · LANID irrigation. Imagery © ESA / USGS; basemap Esri, Maxar.</div></div>')
 
 
@@ -918,7 +920,8 @@ if process:
         outage(status, "read the satellite images", e)
         st.stop()
     sc = info["status_counts"]
-    step(f"**Green-up** — {info['n_scenes']} clear Sentinel-2 dates" + (f" + {info['n_landsat']} Landsat" if info["n_landsat"] else "") +
+    step(f"**Green-up** — " + (f"HLS · {info['n_scenes']} Sentinel-2 + {info['n_landsat']} Landsat dates" if info.get("source") == "HLS" else
+                               f"{info['n_scenes']} clear Sentinel-2 dates" + (f" + {info['n_landsat']} Landsat" if info["n_landsat"] else "")) +
          f" · seen on {sc.get('crossing', 0)} fields · mine on {info['anchor_greenup']} ({info['target_conf_label']} confidence)")
     t_w = dt.datetime.now()
     while not fut_prof.done():                              # poll (not block) so ■ Stop can interrupt here too
@@ -1354,19 +1357,23 @@ with k2, card():
             f"**Green-up** = the day the crop starts to show: a smooth growth curve is fitted through each field's clear images, once with NDVI "
             f"and once with EVI2 (less fooled by wet or bright soil), and green-up is where the curve has made 20 % of its rise. "
             f"Mine: **{anchor.date()}** ({info['anchor_source']}).  \n"
-            f"**Planting** is earlier: seed → emergence → a canopy big enough to see at 10 m. How long that takes depends on heat, so "
+            f"**Planting** is earlier: seed → emergence → a canopy big enough to see from space. How long that takes depends on heat, so "
             f"each field's planting date is worked back from its green-up with **{meth_}**.  \n"
             f"**Well dated** = the curve fits, NDVI and EVI2 agree within {PD.AGREE} days, and clear images ≤ {PD.HIGH_MAX_GAP} days apart bracket "
             f"the green-up → planting good to about a week. **Roughly dated** = green-up seen but blurred (cloudy weeks, too few looks for a "
             f"curve, the two indices disagree, or a weak rise) → could be off by 1–2 weeks.  \n"
             f"**Neighbours:** {n_hi_all} well dated · {n_lo_all} roughly dated · {sc.get('not_emerged', 0) + sc.get('still_emerging', 0)} planted later · "
             f"{sc.get('already_green', 0)} green before planting · {sc.get('too_few_obs', 0)} too cloudy  \n"
-            f"**Imagery:** {info['n_scenes']} clear Sentinel-2 dates" + (f" + {info['n_landsat']} Landsat ({info['tier2_reason']})" if info.get("n_landsat") else "")
+            + (f"**Imagery for green-up:** NASA HLS — {info['n_scenes']} Sentinel-2 + {info['n_landsat']} Landsat dates, already harmonised "
+             "(one 30 m grid, one atmospheric correction, view-angle and band adjustment), so the two satellites line up without jumps."
+             if info.get("source") == "HLS" else
+             f"**Imagery:** {info['n_scenes']} clear Sentinel-2 dates" + (f" + {info['n_landsat']} Landsat ({info['tier2_reason']})" if info.get("n_landsat") else ""))
             + ("  \n**Landsat lined up with Sentinel-2:** NASA's bandpass adjustment, then " + " · ".join(
                 f"{k.upper()} {v['pairs']} same-field pairs within 2 days, gap {v['gap_before']:+.3f} → {v['gap_after']:+.3f}"
                 if v.get("pairs") else f"{k.upper()}: too few same-day pairs, bandpass adjustment only" for k, v in info.get("landsat_cal", {}).items())
                if info.get("landsat_cal") else "")
-            + "  \n**Ranking and trends use Sentinel-2 only** (10 m, one sensor family) — Landsat only helps find green-up in cloudy weeks.")
+            + "  \n**Ranking and trends use native Sentinel-2 only** (10 m: 9× more pixels per field, red-edge bands, newest images) — "
+              "HLS is used only to time green-up and planting.")
 with k3, card():
     if ranked is not None and pd.notna(mr["rank"]):
         sic = si_class(mr["SI"])
@@ -2147,7 +2154,7 @@ with tab_g, card():
             gp["group"] = np.where(gp["field_id"] == "MY_FIELD", "my field", np.where(gp["category"].eq("comparable"), "comparable", "other"))
             if "sensor" not in gp:
                 gp["sensor"] = "S2"
-            gp["sensor"] = gp["sensor"].fillna("S2").map({"S2": "Sentinel-2", "L89": "Landsat (adjusted)"}).fillna("Sentinel-2")
+            gp["sensor"] = gp["sensor"].fillna("S2").map({"S2": "Sentinel-2", "S30": "Sentinel-2", "L89": "Landsat", "L30": "Landsat"}).fillna("Sentinel-2")
             sc_ = alt.Scale(domain=["my field", "comparable", "other"], range=[BLUE, "#16a34a", "#e2e8f0"])
             _pl = pd.Timestamp(R["planting"])
             band = alt.Chart(pd.DataFrame({"s": [_pl - pd.Timedelta(days=window)], "e": [_pl + pd.Timedelta(days=window)],
@@ -2160,7 +2167,7 @@ with tab_g, card():
             mine = (alt.Chart(my_).mark_line(strokeWidth=3.5).encode(x="date:T", y="ndvi:Q", color=alt.Color("group:N", scale=sc_, legend=None))
                     + alt.Chart(my_).mark_point(size=70, filled=True, strokeWidth=2).encode(
                         x="date:T", y="ndvi:Q", color=alt.value(BLUE),
-                        shape=alt.Shape("sensor:N", scale=alt.Scale(domain=["Sentinel-2", "Landsat (adjusted)"], range=["circle", "diamond"]),
+                        shape=alt.Shape("sensor:N", scale=alt.Scale(domain=["Sentinel-2", "Landsat"], range=["circle", "diamond"]),
                                         legend=alt.Legend(title=None, orient="top") if (my_["sensor"] != "Sentinel-2").any() else None),
                         fill=alt.condition(alt.datum.sensor == "Sentinel-2", alt.value(BLUE), alt.value("#ffffff")),
                         tooltip=[alt.Tooltip("date:T", format="%b %d"), alt.Tooltip("ndvi:Q", format=".3f", title=gi_), alt.Tooltip("sensor:N")]))
