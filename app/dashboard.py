@@ -37,19 +37,24 @@ def _reload_changed_modules():
     import importlib
     import os
     mt = getattr(sys, "_fieldrank_mtimes", {})
-    for name in ("si_ranking.config", "si_ranking.imagery", "si_ranking.scenes", "si_ranking.fields", "si_ranking.lite",
-                 "si_ranking.cohort", "si_ranking.profile", "si_ranking.boundary", "si_ranking.season", "si_ranking.growth"):
+    # every module of the package (config first, so the others re-read it) — a new module can never be left stale
+    names = sorted((n for n in list(sys.modules) if n.startswith("si_ranking.")), key=lambda n: (n != "si_ranking.config", n))
+    changed = False
+    for name in names:
         m = sys.modules.get(name)
         f = getattr(m, "__file__", None) if m else None
         if not f or not os.path.exists(f):
             continue
         t = os.path.getmtime(f)
         if name in mt and mt[name] != t:
+            changed = True
+        mt[name] = t
+    if changed:                       # reload them all: modules import each other, so a partial reload can mix old and new code
+        for name in names:
             try:
-                importlib.reload(m)
+                importlib.reload(sys.modules[name])
             except Exception:
                 pass
-        mt[name] = t
     sys._fieldrank_mtimes = mt
 
 
