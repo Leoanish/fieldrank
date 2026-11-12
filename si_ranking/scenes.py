@@ -527,7 +527,11 @@ def _ls_clear(qa: np.ndarray):
     return (((qa >> 6) & 1) == 1) & (((qa >> 1) & 1) == 0) & (((qa >> 3) & 1) == 0) & (((qa >> 4) & 1) == 0)
 
 
-LS_KIND = "l89vi2"          # Landsat green-up cache: NDVI + EVI2 per field per scene
+LS_KIND = "l89vi2h"         # Landsat green-up cache: NDVI + EVI2 per field per scene, bandpass-adjusted to Sentinel-2
+# NASA HLS bandpass adjustment (MSI → OLI, S2A): OLI ≈ slope · MSI + offset. We go the other way (OLI → MSI-like):
+# MSI ≈ (OLI − offset) / slope. https://hls.gsfc.nasa.gov/bandpass-adjustment/
+HLS_RED = (0.9765, 0.0009)
+HLS_NIR = (0.9983, -0.0001)
 
 
 def _ls_scene(item, ids, bbox, labels: _LabelStore, min_pix: int):
@@ -558,8 +562,8 @@ def _ls_scene(item, ids, bbox, labels: _LabelStore, min_pix: int):
         lab = labels.get(ds, subset=grp)
         keep = (lab > 0) & _ls_clear(ds["qa_pixel"].values)
         lab1 = lab[keep]
-        R = ds["red"].values[keep].astype("float32") * 0.0000275 - 0.2
-        N = ds["nir08"].values[keep].astype("float32") * 0.0000275 - 0.2
+        R = ((ds["red"].values[keep].astype("float32") * 0.0000275 - 0.2) - HLS_RED[1]) / HLS_RED[0]
+        N = ((ds["nir08"].values[keep].astype("float32") * 0.0000275 - 0.2) - HLS_NIR[1]) / HLS_NIR[0]
         del ds, keep, lab
         ok_ = (R > 0) & (N > 0)
         md, _, _, c = _zonal((N - R) / (N + R + 1e-6), lab1, n, ok_)

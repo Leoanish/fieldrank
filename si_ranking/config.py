@@ -31,7 +31,6 @@ HOSTED = ROOT.as_posix().startswith("/mount/src") or _os.environ.get("FIELDRANK_
 WORKERS = 2 if HOSTED else 4
 MAX_RADIUS_KM = 20 if HOSTED else 40
 # Scale guards — a 10 km circle in the cotton belt can hold 1000+ fields.
-MAX_FIELDS = 450 if HOSTED else 1200        # nearest same-crop fields kept for the comparison (plenty for a q95 reference)
 MAX_WINDOW_PX = 700_000 if HOSTED else 1_500_000   # largest single raster window read at once (pixels); bigger areas are tiled
 CACHE_MAX_MB = 250 if HOSTED else 1500
 MAX_CONCURRENT_JOBS = 2 if HOSTED else 4   # imagery jobs running at once on one server; more users wait in line instead of crashing it       # imagery cache on disk is trimmed (oldest first) above this
@@ -46,6 +45,9 @@ GA_BBOX = (-85.65, 30.35, -80.75, 35.05)
 # ----------------------------------------------------------------------------
 CDL_CODES = {"corn": 1, "cotton": 2, "soybean": 5, "peanut": 10}
 CODE_TO_CROP = {v: k for k, v in CDL_CODES.items()}
+# Double-crop codes → the summer crop we compare (the small grain comes first, our crop is planted after it)
+DOUBLE_CROP = {26: "soybean", 254: "soybean", 225: "corn", 226: "corn", 237: "corn", 238: "cotton"}
+SUMMER_CROP = {**CODE_TO_CROP, **DOUBLE_CROP}
 CROPS = list(CDL_CODES)
 
 

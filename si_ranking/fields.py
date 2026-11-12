@@ -61,18 +61,26 @@ def load_csb_georgia(csb_path: Path | str, layer: str | None = None) -> gpd.GeoD
 
 def prepare_fields(gdf: gpd.GeoDataFrame, crops: list[str] | None = None,
                    min_acres: float | None = None) -> gpd.GeoDataFrame:
-    """Filter to target crops (latest CDL year), compute area, inward buffer, flags."""
+    """Every field that grew a target crop in ANY year 2018–2025 (incl. double crops), with its crop for each year
+    (crop_2018 … crop_2025), so past seasons compare against the fields that really grew the crop that year."""
     crops = crops or C.CROPS
     cdl_cols = _cdl_columns(gdf.columns)
     latest = cdl_cols[-1]
-    codes = [C.CDL_CODES[c] for c in crops]
+    codes = [k for k, v in C.SUMMER_CROP.items() if v in crops]
 
-    g = gdf[gdf[latest].isin(codes)].copy()
-    g["crop_latest"] = g[latest].map(C.CODE_TO_CROP)
+    g = gdf[gdf[cdl_cols].isin(codes).any(axis=1)].copy()
+    for col in cdl_cols:
+        g[f"crop_{col[3:]}"] = g[col].map(lambda v: C.SUMMER_CROP.get(int(v), "other") if pd.notna(v) else "other")
+        g[f"dbl_{col[3:]}"] = g[col].isin(list(C.DOUBLE_CROP))
+    g["crop_latest"] = g[f"crop_{latest[3:]}"]
     g["cdl_year_latest"] = int(latest[3:])
-    # Rotation history string, e.g. "corn>cotton>peanut>cotton"
-    hist = g[cdl_cols].apply(lambda r: ">".join(C.CODE_TO_CROP.get(int(v), str(int(v))) for v in r), axis=1)
-    g["rotation"] = hist
+    # Rotation history string, e.g. "corn>cotton>peanut>cotton" (double crops shown as "wheat/soybean")
+    def _lab(v):
+        v = int(v)
+        if v in C.DOUBLE_CROP:
+            return "grain/" + C.DOUBLE_CROP[v]
+        return C.CODE_TO_CROP.get(v, str(v))
+    g["rotation"] = g[cdl_cols].apply(lambda r: ">".join(_lab(v) for v in r), axis=1)
     g["n_years_crop"] = (g[cdl_cols].isin(codes)).sum(axis=1)
 
     # Geometry in equal-area CRS for area / buffer, keep WGS84 copy for the app
@@ -98,7 +106,8 @@ def prepare_fields(gdf: gpd.GeoDataFrame, crops: list[str] | None = None,
     ga["field_id"] = ga[id_col].astype(str) if id_col else ("GA" + ga.index.astype(str))
 
     keep = ["field_id", "crop_latest", "cdl_year_latest", "rotation", "n_years_crop",
-            "acres", "area_ha", "inner_ha", "circularity", "pivot_like", "lon", "lat"]
+            "acres", "area_ha", "inner_ha", "circularity", "pivot_like", "lon", "lat"] + \
+        [c for c in ga.columns if re.fullmatch(r"(crop|dbl)_\d{4}", c)]
     cnty = next((c for c in ga.columns if c.upper() in ("CNTY", "COUNTY", "COUNTYFIPS")), None)
     if cnty:
         ga["county"] = ga[cnty].astype(str)
@@ -127,7 +136,7 @@ def load_fields(name: str = "ga_fields.parquet") -> gpd.GeoDataFrame:
 
 
 def fields_in_buffer(fields: gpd.GeoDataFrame, lon: float, lat: float, radius_km: float,
-                     crop: str | None = None) -> gpd.GeoDataFrame:
+                     crop: str | None = None, crop_col: str = "crop_latest") -> gpd.GeoDataFrame:
     """Fields whose centroid lies within radius_km of (lon, lat)."""
     from shapely.geometry import Point
     pt = gpd.GeoSeries([Point(lon, lat)], crs="EPSG:4326").to_crs(C.EQUAL_AREA_CRS).iloc[0]
@@ -136,7 +145,7 @@ def fields_in_buffer(fields: gpd.GeoDataFrame, lon: float, lat: float, radius_km
     sel = fields[d <= radius_km].copy()
     sel["dist_km"] = d[d <= radius_km].values
     if crop:
-        sel = sel[sel["crop_latest"] == crop]
+        sel = sel[sel[crop_col if crop_col in sel else "crop_latest"] == crop]
     return sel.sort_values("dist_km")
 
 
@@ -184,6 +193,8 @@ def build_tiles(src: Path | str | gpd.GeoDataFrame | None = None, out_dir: Path 
         part.drop(columns="tile").reset_index(drop=True).to_parquet(out_dir / f"{t}.parquet", compression="zstd")
     idx = pd.DataFrame({"field_id": g["field_id"].astype(str), "crop_latest": g["crop_latest"].astype("category"),
                         "acres": g["acres"].astype("float32"), "lon": g["lon"], "lat": g["lat"], "tile": g["tile"].astype("category")})
+    for c in sorted(c for c in g.columns if re.fullmatch(r"crop_\d{4}", c)):
+        idx[c] = g[c].astype("category").values
     idx.to_parquet(out_dir / "index.parquet", compression="zstd")
     print(f"{len(g):,} fields → {g['tile'].nunique()} tiles in {out_dir}")
     return out_dir
@@ -241,14 +252,29 @@ class FieldStore:
         g = g[g["field_id"].astype(str).isin(set(rows["field_id"]))]
         return gpd.GeoDataFrame(g, geometry="geometry", crs="EPSG:4326")
 
-    def near(self, lon: float, lat: float, radius_km: float, crop: str | None = None) -> gpd.GeoDataFrame:
-        """Fields whose centroid is within radius_km — the old fields_in_buffer, without reading the state."""
+    @property
+    def years(self) -> list[int]:
+        """Years with a crop label in this field store (e.g. 2018…2025); [] for old tiles with the latest label only."""
+        return sorted(int(c[5:]) for c in self.index.columns if re.fullmatch(r"crop_\d{4}", c))
+
+    def label_year(self, season_year: int) -> tuple[int | None, str]:
+        """Which year's crop labels to use for a season: the same year when we have it, else the newest (or oldest).
+        Returns (year, column)."""
+        ys = self.years
+        if not ys:
+            return None, "crop_latest"
+        y = min(max(season_year, ys[0]), ys[-1])
+        return y, f"crop_{y}"
+
+    def near(self, lon: float, lat: float, radius_km: float, crop: str | None = None, season_year: int | None = None) -> gpd.GeoDataFrame:
+        """Fields whose centroid is within radius_km, growing `crop` in `season_year` (labels of that year when available)."""
         d = self._dist_km(lon, lat)
         m = d <= radius_km * 1.02 + 0.2                       # fast pre-filter, exact distance below
+        col = self.label_year(season_year)[1] if season_year else "crop_latest"
         if crop:
-            m &= (self.index["crop_latest"] == crop).values
+            m &= (self.index[col] == crop).values
         g = self._fields(self.index[m])
-        return fields_in_buffer(g, lon, lat, radius_km, crop) if len(g) else g.assign(dist_km=[])
+        return fields_in_buffer(g, lon, lat, radius_km, crop, col) if len(g) else g.assign(dist_km=[])
 
     def at(self, lon: float, lat: float) -> pd.Series:
         """The field containing the point, else the nearest one."""

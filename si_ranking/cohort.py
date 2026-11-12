@@ -30,7 +30,7 @@ import pandas as pd
 from . import config as C
 from .imagery import _rasterize_fields, _zonal  # noqa: F401  (Landsat tier)
 
-CACHE_VERSION = "v8-evi2-curve-trough"   # bump when detector/search changes -> old caches ignored
+CACHE_VERSION = "v9-landsat-harmonized"   # bump when detector/search changes -> old caches ignored
 GREENUP_DELTA = 0.10           # rise above bare-soil baseline that marks green-up
 GREENUP_CONFIRM_ABS = 0.28     # canopy must reach this NDVI ...
 GREENUP_CONFIRM_REL = 0.15     # ... and baseline + this, to count as a real crop
@@ -91,6 +91,39 @@ def _s2_series(fields, planting, days_before, days_after, log, progress):
 
 
 # ----------------------------------------------------------------------------- tier 2: Landsat 8/9
+def harmonize_landsat(ts: pd.DataFrame, max_days: int = 2):
+    """Line Landsat up with Sentinel-2 so mixed curves don't jump between sensors.
+    Pairs = the same field seen by both within ±max_days. ≥ 15 pairs: robust line (Theil–Sen) S2 ≈ a + b·Landsat;
+    5–14: median difference only; fewer: left as is (the HLS bandpass adjustment is already applied at read time).
+    Returns (ts, info) — info per index: pairs, slope, offset, median gap before/after."""
+    info = {}
+    if ts.empty or not (ts["sensor"] == "L89").any() or not (ts["sensor"] == "S2").any():
+        return ts, info
+    s2 = ts[ts["sensor"] == "S2"]; ls = ts[ts["sensor"] == "L89"]
+    pr = pd.merge_asof(ls.sort_values("date"), s2.sort_values("date")[["date", "field_id", "ndvi", "evi2"]].rename(
+        columns={"ndvi": "ndvi_s2", "evi2": "evi2_s2", "date": "date_s2"}), left_on="date", right_on="date_s2", by="field_id",
+        direction="nearest", tolerance=pd.Timedelta(days=max_days))
+    ts = ts.copy()
+    for col in ("ndvi", "evi2"):
+        if col not in ts:
+            continue
+        d = pr[[col, f"{col}_s2"]].dropna()
+        n = len(d); a_, b_ = 0.0, 1.0
+        if n >= 15 and d[col].std() > 0.02:
+            from scipy.stats import theilslopes
+            b_, a_, _, _ = theilslopes(d[f"{col}_s2"], d[col])
+            if not 0.7 <= b_ <= 1.3:                                  # implausible → fall back to an offset
+                b_, a_ = 1.0, float((d[f"{col}_s2"] - d[col]).median())
+        elif n >= 5:
+            a_ = float((d[f"{col}_s2"] - d[col]).median())
+        m = ts["sensor"] == "L89"
+        ts.loc[m, col] = a_ + b_ * ts.loc[m, col]
+        info[col] = {"pairs": n, "slope": round(float(b_), 3), "offset": round(float(a_), 3),
+                     "gap_before": round(float((d[f"{col}_s2"] - d[col]).median()), 3) if n else None,
+                     "gap_after": round(float((d[f"{col}_s2"] - (a_ + b_ * d[col])).median()), 3) if n else None}
+    return ts, info
+
+
 def _landsat_series(fields, planting, days_before, days_after, log, progress):
     """Landsat 8/9 NDVI for the window (fast engine: cached monthly search, 120 m per-field cloud screen,
     one 30 m read per useful scene, scenes in parallel, per-scene field cache)."""
@@ -301,7 +334,7 @@ def planting_cohort(fields: gpd.GeoDataFrame, target_id: str, planting: dt.date,
     tgt_missing = tgt["greenup_date"] is None or pd.isna(tgt["greenup_date"])
     need_l = allow_landsat and n_l == 0 and (tgt_missing or coverage < COVERAGE_TRIGGER or
                                              (pd.notna(tgt["gap_days"]) and tgt["gap_days"] > GAP_TRIGGER))
-    tier2_reason = ""
+    tier2_reason = ""; ls_cal = {}
     if need_l:
         tier2_reason = ("target not detected" if tgt_missing else
                         f"coverage {coverage:.0%} < {COVERAGE_TRIGGER:.0%}" if coverage < COVERAGE_TRIGGER else
@@ -314,6 +347,7 @@ def planting_cohort(fields: gpd.GeoDataFrame, target_id: str, planting: dt.date,
         ls, n_l = _landsat_series(ls_fields, planting, days_before, days_after, log, progress)
         if len(ls):
             ts = pd.concat([ts, ls], ignore_index=True)
+            ts, ls_cal = harmonize_landsat(ts)
             progress(0.96, "Detecting green-up (Sentinel-2 + Landsat)…")
             det = _detect_all(ts, fields, planting)
             tgt = det[det["field_id"] == target_id].iloc[0]
@@ -333,7 +367,7 @@ def planting_cohort(fields: gpd.GeoDataFrame, target_id: str, planting: dt.date,
         det["in_window"] = det["in_window"] & (det["irrigated"].eq(mine) | det["field_id"].eq(target_id))
     det["ref_ok"] = det["in_window"] & (det["confidence"] >= CONF_MED)
     info = {"anchor_greenup": anchor, "anchor_source": anchor_src, "anchor_observed": bool(anchor_obs), "n_scenes": int(n_s2), "n_landsat": int(n_l),
-            "tier2": bool(need_l), "tier2_reason": tier2_reason,
+            "tier2": bool(need_l), "tier2_reason": tier2_reason, "landsat_cal": ls_cal,
             "n_detected": int(det["greenup_date"].notna().sum()), "n_in_window": int(det["in_window"].sum()),
             "n_high": int((det["conf_label"] == "high").sum()), "n_medium": int((det["conf_label"] == "medium").sum()),
             "n_low": int((det["conf_label"] == "low").sum()),

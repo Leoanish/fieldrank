@@ -102,6 +102,10 @@ case "$STEP" in
   profiles-ga)
     say "Pre-computing profiles for every Georgia field (resumable — stop with Ctrl-C and run again to continue)…"
     python scripts/02_get_profile_layers.py profiles --all "${@:2}" ;;
+  fields)
+    say "Rebuilding Georgia fields from the national CSB 2018–2025 (crop per year + double crops) — ~5–15 min…"
+    CSB="${2:-data/raw/CSB1825.gdb}"
+    python -m si_ranking.cli fields --csb "$CSB" ;;
   tiles)
     say "Splitting data/fields/ga_fields.parquet into map tiles…"
     python -m si_ranking.cli tiles ;;
@@ -118,5 +122,5 @@ case "$STEP" in
   check)
     python -c "import rasterio, geopandas, odc.stac, streamlit; print('rasterio', rasterio.__version__, '| geopandas', geopandas.__version__, '| streamlit', streamlit.__version__)" ;;
   *)
-    warn "unknown step '$STEP' — use: lanid | soil | profiles | profiles-ga | tiles | warm | publish | app | check"; exit 1 ;;
+    warn "unknown step '$STEP' — use: fields | lanid | soil | profiles | profiles-ga | tiles | warm | publish | app | check"; exit 1 ;;
 esac

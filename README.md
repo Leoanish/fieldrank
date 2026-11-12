@@ -44,8 +44,10 @@ Streamlit Community Cloud.
 - **Greenness is not yield.** Satellites show *that* a field is behind its neighbours, not *why*; the field visit tells
   you the cause. During the yield-critical stage the gap is the best early warning there is.
 - Planting-date estimates are model-based (± about a week for well-dated fields, 1–2 weeks for roughly dated ones).
-- The free hosting has limited memory: a search is capped at the nearest 450 same-crop fields and 20 km, and when
-  several people search at once the extra searches wait their turn.
+- Every field of your crop inside the search circle is compared (default 7 km; up to 20 km online). When several
+  people search at once on the free hosting, the extra searches wait their turn.
+- Past seasons (2018–2025) use the crops fields really grew that year; for 2026 the newest labels (2025) are used
+  until USDA publishes 2026 — some fields will have rotated.
 
 ## Data sources
 
