@@ -315,13 +315,27 @@ def fmt(v, f=".0f", unit=""):
 
 
 # ============================================================================ data + state
-@st.cache_resource(show_spinner="Opening the Georgia field index…")
-def _store():
+@st.cache_resource(show_spinner="Opening the Georgia field index…", max_entries=1)
+def _store(_version: str):
     return FieldStore()          # tiny index in memory; field tiles are read only around the chosen field
 
 
+def _store_version() -> str:
+    """Changes whenever the field code or the field tiles change, so a server that keeps running after an update
+    never serves an index built by older code."""
+    import hashlib
+    import si_ranking.fields as _fm
+    h = hashlib.md5(Path(_fm.__file__).read_bytes())
+    idx = Path(_fm.TILES_DIR) / "index.parquet"
+    if idx.exists():
+        h.update(str(idx.stat().st_mtime_ns).encode() + str(idx.stat().st_size).encode())
+    return h.hexdigest()
+
+
 try:
-    STORE = _store()
+    STORE = _store(_store_version())
+    if not hasattr(STORE, "label_year"):          # belt and braces: an index from older code
+        _store.clear(); STORE = _store(_store_version())
 except Exception as e:
     st.error(f"Field tiles missing — run `python -m si_ranking.cli tiles` (or put data/fields/ga_fields.parquet in place). ({e})")
     st.stop()
