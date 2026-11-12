@@ -39,6 +39,11 @@ GREENUP_GDD = {"corn": 150.0, "cotton": 150.0, "peanut": 190.0, "soybean": 230.0
 GREENUP_DAYS = {"corn": 21, "cotton": 17, "peanut": 17, "soybean": 14}          # fallback without weather
 LAG_DAYS_OK = (5, 45)               # plausible planting → visible green-up, days
 GDD_OK = (0.4, 2.5)                 # own-field thermal time accepted within this × the crop default
+GDD_TYPICAL = (0.6, 1.7)            # … and called a clear confirmation within this × the crop default (≈ 2–3 weeks)
+# How much my field's own planting → green-up timing replaces the crop default (adaptive calibration):
+# the farmer's date is known; a clearly seen green-up at a typical delay confirms it and teaches the timing for this season,
+# place and weather. A blurred green-up or an unusual delay is trusted only partly.
+CAL_WEIGHT = {("high", True): 1.0, ("high", False): 0.7, ("low", True): 0.7, ("low", False): 0.4}
 HIGH_MAX_GAP = 15                   # clear images ≤ 15 d apart around the green-up → about ± 1 week
 HIGH_MIN_RISE = 0.12
 HIGH_MIN_MONO = 0.6
@@ -127,7 +132,8 @@ def estimate(det: pd.DataFrame, crop: str, my_planting: dt.date, my_id: str = "M
         except Exception:
             days = cum = None
     info = {"method": "degree-days" if cum is not None else "days", "default_gdd": GREENUP_GDD[crop], "default_days": GREENUP_DAYS[crop],
-            "my_lag_days": my_lag, "calibrated": False, "warn": ""}
+            "my_lag_days": my_lag, "calibrated": False, "cal_weight": 0.0, "cal_state": "default", "warn": ""}
+    my_conf = me["plant_conf"]
 
     # ---- thermal time (or days) planting → visible green-up
     target_gdd, lag_days = GREENUP_GDD[crop], GREENUP_DAYS[crop]
@@ -137,9 +143,16 @@ def estimate(det: pd.DataFrame, crop: str, my_planting: dt.date, my_id: str = "M
             g_me = _gdd_between(days, cum, my_planting, my_gu.date())
             info["my_gdd"] = g_me
             if ok_days and g_me is not None and GDD_OK[0] * GREENUP_GDD[crop] <= g_me <= GDD_OK[1] * GREENUP_GDD[crop]:
-                target_gdd, info["calibrated"] = g_me, True
+                typical = GDD_TYPICAL[0] * GREENUP_GDD[crop] <= g_me <= GDD_TYPICAL[1] * GREENUP_GDD[crop]
+                w = CAL_WEIGHT.get((my_conf, typical), 0.4)
+                target_gdd = w * g_me + (1 - w) * GREENUP_GDD[crop]
+                info.update(calibrated=True, cal_weight=w)
         elif ok_days:
-            lag_days, info["calibrated"] = my_lag, True
+            typical = GDD_TYPICAL[0] * GREENUP_DAYS[crop] <= my_lag <= GDD_TYPICAL[1] * GREENUP_DAYS[crop]
+            w = CAL_WEIGHT.get((my_conf, typical), 0.4)
+            lag_days = w * my_lag + (1 - w) * GREENUP_DAYS[crop]
+            info.update(calibrated=True, cal_weight=w)
+        info["cal_state"] = "confirmed" if info["cal_weight"] >= 0.95 else ("partly" if info["calibrated"] else "default")
         if not info["calibrated"]:
             info["warn"] = (f"My field greened up {my_lag} days {'after' if my_lag >= 0 else 'BEFORE'} the planting date entered — for {crop} "
                             f"this usually takes {LAG_DAYS_OK[0]}–{LAG_DAYS_OK[1]} days. Neighbours' planting dates use the typical "
@@ -154,7 +167,7 @@ def estimate(det: pd.DataFrame, crop: str, my_planting: dt.date, my_id: str = "M
             est.append(None); lags.append(np.nan); continue
         d_ = _back(days, cum, g_.date(), target_gdd) if cum is not None else None
         if d_ is None:                                    # no weather for this date → days
-            d_ = (g_ - pd.Timedelta(days=lag_days if cum is None or not info["calibrated"] or my_lag is None else my_lag)).date()
+            d_ = (g_ - pd.Timedelta(days=round(lag_days if cum is None else GREENUP_DAYS[crop] * target_gdd / GREENUP_GDD[crop]))).date()
         est.append(d_); lags.append((g_.date() - d_).days)
     det["est_planting"] = est
     det["lag_days"] = lags
@@ -172,9 +185,26 @@ def estimate(det: pd.DataFrame, crop: str, my_planting: dt.date, my_id: str = "M
         info.update(my_sat_planting=sat, my_sat_unc=float(mine_["plant_unc"]), my_conf=mine_["plant_conf"])
     else:
         info.update(my_sat_planting=None, my_sat_unc=None, my_conf=None)
+    # ---- planting difference to mine in HEAT-UNIT days: a 10-day gap in a cool March is less crop development than in a hot
+    # June, so neighbours are matched on the °C-days between the two planting dates, expressed in this season's typical days
+    det["delta_tdays"] = np.nan
+    if cum is not None:
+        g0 = _gdd_between(days, cum, my_planting - dt.timedelta(days=15), my_planting + dt.timedelta(days=30))
+        per_day = (g0 / 45.0) if g0 else None
+        if per_day and per_day > 0.5:
+            info["gdd_per_day"] = per_day
+            td = []
+            for d_ in det["est_planting"]:
+                if d_ is None or pd.isna(d_):
+                    td.append(np.nan); continue
+                a_, b_ = (my_planting, d_) if d_ >= my_planting else (d_, my_planting)
+                g_ = _gdd_between(days, cum, a_, b_) if a_ != b_ else 0.0
+                td.append(np.nan if g_ is None else np.sign((d_ - my_planting).days) * g_ / per_day)
+            det["delta_tdays"] = td
     # the farmer's date is what he knows: my field's planting is the entered date
     det.loc[det["field_id"] == my_id, ["est_planting", "plant_lo", "plant_hi"]] = [my_planting, my_planting, my_planting]
     det.loc[det["field_id"] == my_id, "plant_unc"] = 0
+    det.loc[det["field_id"] == my_id, "delta_tdays"] = 0.0
     nb = det[det["field_id"] != my_id]
     info["n_high"] = int((nb["plant_conf"] == "high").sum()); info["n_low"] = int((nb["plant_conf"] == "low").sum())
     info["n_none"] = int(nb["plant_conf"].isna().sum())

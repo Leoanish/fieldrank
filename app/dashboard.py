@@ -158,6 +158,13 @@ div[data-testid="stDataFrame"] { border-radius:14px; overflow:hidden; }
 .callout.warn { background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; }
 .callout.err { background:#fef2f2; border:1px solid #fecaca; color:#991b1b; }
 .callout.info { background:#eff6ff; border:1px solid #bfdbfe; color:#1e3a8a; }
+.howstrip { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:.6rem; margin:0 0 .9rem; }
+.howstrip .hs { display:flex; gap:.6rem; align-items:flex-start; background:#fff; border:1px solid var(--line); border-radius:14px; padding:.7rem .85rem; font-size:.82rem; color:#334155; line-height:1.45; }
+.howstrip .hn { flex:0 0 1.5rem; height:1.5rem; border-radius:999px; background:#0f172a; color:#fff; font-weight:700; font-size:.78rem; display:flex; align-items:center; justify-content:center; }
+@media (max-width: 760px) { .howstrip { grid-template-columns:1fr; } }
+.st-key-plantcheck { background:#fffbeb; border:1px solid #fcd34d; border-radius:14px; padding:12px 16px; margin:.1rem 0 .9rem; }
+.st-key-plantcheck .pc-t { font-weight:700; color:#78350f; margin-bottom:.2rem; }
+.st-key-plantcheck .pc-b { font-size:.86rem; color:#78350f; line-height:1.5; }
 .datebar { font-size:.9rem; color:#334155; line-height:1.5; padding-top:1.55rem; }
 .datebar.warn { color:#92400e; }
 .n-eyebrow { font-size:.74rem; font-weight:800; letter-spacing:.08em; text-transform:uppercase; color:#15803d; }
@@ -530,7 +537,8 @@ with st.sidebar:
         html('<div class="sb-h">Compare only with fields that have…</div>')
         st.toggle("Similar planting", value=True, disabled=True, help="Always on: estimated planting date within ± the days below of mine")
         window = st.slider("Planting within ± days of mine", 3, 14, C.PLANTING_WINDOW_DAYS, key="plant_window",
-                           help="Fields whose estimated planting date is this close to the date you entered. ±10 days keeps crop stage and size alike; narrow it for a stricter match.")
+                           help="Fields whose estimated planting date is this close to the date you entered — counted in heat-unit days from local weather "
+                                "(so a 10-day gap in cool March counts less than in hot June). ±10 days keeps crop stage and size alike; narrow it for a stricter match.")
         _pt = ss["result"]["table"] if "result" in ss else None
         _pc = (_pt.loc[_pt["field_id"] != "MY_FIELD", "plant_conf"].value_counts().to_dict() if _pt is not None and "plant_conf" in _pt else {})
         _plab = {"High confidence": "Well dated only" + (f" · {_pc.get('high', 0)}" if _pc else ""),
@@ -934,7 +942,7 @@ if process:
     wx = PD.weather_for(c.x, c.y, planting, log=lambda s_: None)
     pdet, pinfo = PD.estimate(coh, crop, planting, "MY_FIELD", wx)
     table = table.drop(columns=[c_ for c_ in ("est_planting",) if c_ in table]).merge(
-        pdet[["field_id", "est_planting", "plant_lo", "plant_hi", "plant_unc", "plant_conf", "plant_why", "lag_days"]], on="field_id", how="left")
+        pdet[["field_id", "est_planting", "plant_lo", "plant_hi", "plant_unc", "plant_conf", "plant_why", "lag_days"] + (["delta_tdays"] if "delta_tdays" in pdet else [])], on="field_id", how="left")
     lag_days = pinfo.get("my_lag_days")
     step(f"**Planting dates** — {pinfo['n_high']} well dated · {pinfo['n_low']} roughly dated · {pinfo['n_none']} not visible · "
          + (f"timing from local weather ({'calibrated on my field' if pinfo['calibrated'] else 'crop default'})" if pinfo["method"] == "degree-days"
@@ -972,7 +980,10 @@ ep_ = pd.to_datetime(T["est_planting"], errors="coerce")
 T["delta_days"] = (ep_ - pd.Timestamp(R["planting"])).dt.days          # estimated planting − my planting date
 has_date = ep_.notna() & T["plant_conf"].notna()
 trusted = has_date & (T["plant_conf"].eq("high") | (plant_mode == "All estimated"))
-T["similar_planting"] = (trusted & T["delta_days"].abs().le(window)) | is_me
+# matched in heat-unit days when local weather is available (same crop development, not just same calendar gap), else calendar days
+T["delta_match"] = T["delta_tdays"].where(T["delta_tdays"].notna(), T["delta_days"]) if "delta_tdays" in T else T["delta_days"]
+HEAT_MATCH = "delta_tdays" in T and T["delta_tdays"].notna().any()
+T["similar_planting"] = (trusted & T["delta_match"].abs().le(window)) | is_me
 final, STAGES, prof_reason = auto_match(T, me, T["similar_planting"], elevation=t_elev, soil=t_soil, irrigation=t_irr)
 T["in_window"] = final
 # reference = the q-quantile of ALL comparable fields (never mine) — the same set every field is ranked in, so with q = 0.98
@@ -1002,6 +1013,24 @@ n_hi_all = int((nb["plant_conf"] == "high").sum()); n_lo_all = int((nb["plant_co
 
 observed = bool(info.get("anchor_observed", "not visible" not in str(info.get("anchor_source", ""))))
 DEFAULT_RANK_DATE = min(dt.date.today(), R["planting"] + dt.timedelta(days=75))
+
+
+IMG_COLS = ["field_id", "date", "scene_id", "n_pix"] + [c for k in C.VI_ENGINE for c in (k, f"{k}_p10", f"{k}_p90")]
+
+
+def full_cols(df):
+    """Every image table gets the same columns (missing ones as empty) + the derived indices, so ranking on any index,
+    any date, after any number of changes can never fail on a missing column."""
+    if df is None:
+        return None
+    df = df.copy()
+    for c_ in IMG_COLS:
+        if c_ not in df:
+            df[c_] = pd.Series(dtype="datetime64[ns]") if c_ == "date" else (pd.Series(dtype=object) if c_ in ("field_id", "scene_id") else np.nan)
+    for c_ in IMG_COLS[3:]:
+        df[c_] = pd.to_numeric(df[c_], errors="coerce")
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    return G.add_derived(df) if len(df) else df.assign(**{v_: np.nan for v_ in G.ALL_VI if v_ not in df})
 
 
 # ============================================================================ rank dialog (pop-up)
@@ -1069,20 +1098,22 @@ if ss.get("season_request"):
             S_, n_found, n_used = run_heavy(prog, season_series, sub, pd.Timestamp(rkey[0]).date(), pd.Timestamp(rkey[1]).date(), progress=prog, log=lambda s_: None)
         except Exception as e:
             outage(status, "read the season's images", e)
-            S_, n_found, n_used = pd.DataFrame(), 0, 0
+            S_, n_found, n_used = pd.DataFrame(columns=IMG_COLS), -1, 0
         merged = pd.concat([have, S_], ignore_index=True) if have is not None and len(have) else S_
         ss.season_cache[rkey] = merged
         for k_ in list(ss.season_cache)[:-2]:           # keep the last 2 season ranges per visitor
             ss.season_cache.pop(k_, None)
-        ss.setdefault("season_fetched", {})[rkey] = (have_ids | set(sub["field_id"]))
-        done(f"Season ready · {n_used} clear dates of {n_found} scenes · {len(sub)} field{'s' if len(sub) != 1 else ''} read · {(dt.datetime.now() - t0).total_seconds():.0f} s")
+        if n_found >= 0:
+            ss.setdefault("season_fetched", {})[rkey] = (have_ids | set(sub["field_id"]))
+        if n_found >= 0:
+            done(f"Season ready · {n_used} clear dates of {n_found} scenes · {len(sub)} field{'s' if len(sub) != 1 else ''} read · {(dt.datetime.now() - t0).total_seconds():.0f} s")
     ss.season_key = rkey; ss.pop("season_bars", None)
-S_season = ss.season_cache.get(ss.get("season_key")) if ss.get("season_key") else None
+S_season = full_cols(ss.season_cache.get(ss.get("season_key"))) if ss.get("season_key") else None
 season_missing = set()
 if S_season is not None:
     fetched = ss.get("season_fetched", {}).get(ss.season_key, set(S_season["field_id"].unique()))
     season_missing = need_ids - fetched                               # filters were loosened after loading
-    S_season = G.add_derived(S_season[S_season["field_id"].isin(need_ids)])   # only today's comparable set is used
+    S_season = full_cols(S_season[S_season["field_id"].isin(need_ids)])   # only today's comparable set is used
 
 # ============================================================================ ONE check date drives everything
 # rank card, "should I scout?", map, ranking bars and charts all use the same image and the same numbers
@@ -1130,11 +1161,14 @@ ref_now = T.loc[T["ref_ok"] & ~is_me, "field_id"]
 min_n = 5 if len(comp_now) >= 10 else 3
 S_now = None
 if now_have is not None and len(now_have[0]):
-    S_now = now_have[0][now_have[0]["field_id"].isin(need_ids)]
+    S_now = full_cols(now_have[0])
+    S_now = S_now[S_now["field_id"].isin(need_ids)]
 IMG_DATE, IMG_N = G.pick_image_date(S_now, comp_now, "MY_FIELD", CHECK_DATE, int(max_days), min_n) if S_now is not None else (None, 0)
 VI_CHOICE = ss.get("vi_seg") or G.BEST
 RANK_DATE = IMG_DATE or CHECK_DATE
 RANK_STAGE = G.stage_at(R["crop"], (RANK_DATE - R["planting"]).days)
+if VI_CHOICE not in [G.BEST, G.CONSENSUS] + list(G.ALL_VI):      # a value left over from an older version of the app
+    VI_CHOICE = G.BEST; ss["vi_seg"] = G.BEST
 VI = G.resolve_vi(VI_CHOICE, R["crop"], (RANK_DATE - R["planting"]).days)
 VI_TAG = f"★ {VI}" if VI_CHOICE in (G.BEST, G.CONSENSUS) else VI
 USE_CONS = VI_CHOICE == G.CONSENSUS
@@ -1158,11 +1192,20 @@ ranked = ref = mr = None
 IMG_IDS = []
 N_COMP = int(len(comp_now))                     # comparable fields, never counting mine
 N_RANKED = N_NOIMG = 0
+RT = None
+if IMG_DATE is not None:
+    S_rank = S_now
+    try:
+        RT = rank_on_date(S_rank, comp_now, ref_now, "MY_FIELD", VI, IMG_DATE,
+                          min(CHECK_DATE, IMG_DATE + dt.timedelta(days=RANK_WINDOW)), q, window=RANK_WINDOW)
+        if RT is None or not (RT["field_id"] == "MY_FIELD").any():
+            raise ValueError("my field has no value on this image")
+    except Exception as e:
+        st.warning(f"Could not rank on the {IMG_DATE:%b %d} image with {VI} ({type(e).__name__}). Try another date or index — "
+                   "nothing else is affected.", icon="⚠️")
+        IMG_DATE, IMG_N, RT = None, 0, None
 if IMG_DATE is not None:
     IMG_IDS = sorted(S_now.loc[S_now["date"] == pd.Timestamp(IMG_DATE), "scene_id"].astype(str).unique())
-    S_rank = G.add_derived(S_now)
-    RT = rank_on_date(S_rank, comp_now, ref_now, "MY_FIELD", VI, IMG_DATE,
-                      min(CHECK_DATE, IMG_DATE + dt.timedelta(days=RANK_WINDOW)), q, window=RANK_WINDOW)
     ranked = T.drop(columns=[c for c in ("vi_median", "vi_p10", "vi_p90", "n_pix", "obs_date", "scene_id", "SI", "rank") if c in T]).merge(RT, on="field_id", how="left")
     ranked["in_cohort"] = ranked["in_window"].fillna(False).astype(bool)
     ranked["is_ref_field"] = ranked["in_ref"].fillna(False).astype(bool) & (ranked["SI"] >= 1 - 1e-9) & (ranked["field_id"] != "MY_FIELD")
@@ -1280,7 +1323,7 @@ with k1, card():
         if big_[1] > 0:
             html(f'<div class="rankst warn">Most fields were dropped at <b>{big_[0]}</b> (−{big_[1]}). To compare with more: {big_[2]}.</div>')
     with popover("How 'similar' is decided"):
-        st.markdown(f"- **Planting** — estimated planting date within ± {window} days of the date I entered (always on) · "
+        st.markdown(f"- **Planting** — estimated planting date within ± {window} {'heat-unit ' if HEAT_MATCH else ''}days of the date I entered (always on) · "
                     f"{'well-dated fields only' if plant_mode == 'High confidence' else 'well and roughly dated fields'}\n"
                     "- **Elevation** — field median within half the local inter-quartile range (3–10 m)\n"
                     "- **Soil** — same USDA texture group, 0–30 cm\n"
@@ -1292,6 +1335,7 @@ with k2, card():
         sat_ = PINFO.get("my_sat_planting")
         html(f'<div class="kpi"><div class="lab">My green-up</div><div class="val">{anchor.strftime("%b %d")}</div>'
              f'<div class="sub">{lag:+d} d after planting'
+             + {"confirmed": ' · <b style="color:#15803d">confirms my date ✓</b>', "partly": ' · partly confirms my date'}.get(PINFO.get("cal_state"), "")
              + (f'<br>satellite: planted ≈ <b>{sat_:%b %d}</b> ± {PINFO.get("my_sat_unc", 0):.0f} d' if sat_ else "") + '</div>'
              f'<div class="sub" style="margin-top:.3rem"><span class="pill {"g" if pc_ == "high" else "a"}">{"Well dated" if pc_ == "high" else "Roughly dated"}</span>'
              + (f' &nbsp;NDVI {pd.Timestamp(T.loc[is_me, "onset_ndvi"].iloc[0]):%b %d} · EVI2 {pd.Timestamp(T.loc[is_me, "onset_evi2"].iloc[0]):%b %d}'
@@ -1302,7 +1346,8 @@ with k2, card():
              f'<div class="sub"><span class="pill a">assumed {anchor.strftime("%b %d")}</span> &nbsp;planting + {NOMINAL_EMERGENCE_DAYS} d</div></div>')
     with popover("Planting dates"):
         sc = info.get("status_counts", {})
-        meth_ = (f"local weather (degree-days), {'calibrated on my field' if PINFO.get('calibrated') else 'crop default'} — "
+        _cs = {"confirmed": "confirmed by my field", "partly": f"{PINFO.get('cal_weight', 0) * 100:.0f}% my field + crop default"}.get(PINFO.get("cal_state"), "crop default")
+        meth_ = (f"local weather (degree-days), {_cs} — "
                  f"{PINFO.get('target_gdd') or 0:.0f} °C-days from planting to visible green-up" if PINFO.get("method") == "degree-days"
                  else f"{'my field' if PINFO.get('calibrated') else 'typical'} timing in days (weather not available)")
         st.markdown(
@@ -1388,9 +1433,36 @@ if miss:
          + (" <br><b>Fix:</b> run <code>bash scripts/fieldrank.sh soil</code> once (builds the soil table from Planetary Computer, "
             "so the USDA server is no longer needed), then press <b>Find comparable fields</b> again." if any(l_ == "soil" for l_, _ in miss) else "")
          + "</div>")
-if PINFO.get("warn"):
-    sat_ = PINFO.get("my_sat_planting")
-    html(f'<div class="callout warn">{PINFO["warn"]}' + (f' The satellite alone puts my planting around <b>{sat_:%b %d}</b>.' if sat_ else "") + '</div>')
+PLANT_OFF_DAYS = 20          # entered planting vs what the satellite + weather suggest — beyond this we ask the user to check
+
+
+def _use_sat_planting(d_):
+    ss["planting"] = d_; ss["auto_process"] = True
+    ss.pop("check_date", None)
+
+
+_sat = PINFO.get("my_sat_planting")
+_off = (R["planting"] - _sat).days if _sat else None
+if PINFO.get("warn") or (_off is not None and abs(_off) >= PLANT_OFF_DAYS):
+    _lag = PINFO.get("my_lag_days")
+    _wxt = "in this season's weather" if PINFO.get("method") == "degree-days" else "with typical timing"
+    with st.container(key="plantcheck"):
+        cA, cB = st.columns([3.2, 1], vertical_alignment="center")
+        with cA:
+            html('<div class="pc-t">📅 Is the planting date right?</div><div class="pc-b">'
+                 f'You entered <b>{R["planting"]:%b %d, %Y}</b>. The satellite saw your field green up on <b>{anchor:%b %d}</b>'
+                 + (f' — {abs(_lag)} days {"after" if _lag >= 0 else "<u>before</u>"} that date' if _lag is not None else "") + '. '
+                 + (f'For {R["crop"]} {_wxt}, that points to planting around <b>{_sat:%b %d}</b> '
+                    f'(± {PINFO.get("my_sat_unc") or 0:.0f} days) — <b>{abs(_off)} days {"earlier" if _off > 0 else "later"}</b> than entered. ' if _sat else "")
+                 + ('Because the gap is outside the usual range, neighbours are dated with typical crop timing, so <b>few of them may match '
+                    'your date</b>. ' if PINFO.get("warn") else
+                    'Neighbours are still matched fairly — on how far their green-up is from yours — but a typo here also shifts the season '
+                    'stage and the ★ index. ')
+                 + 'If the date was mistyped, use the satellite date; if you replanted or know it\'s right, keep yours.</div>')
+        with cB:
+            if _sat:
+                st.button(f"Use {_sat:%b %d} and search again", key="use_sat_plant", type="primary", use_container_width=True,
+                          on_click=_use_sat_planting, args=(_sat,))
 elif not observed:
     html(f'<div class="callout warn">My field\'s green-up could not be seen in the images ({str(me["greenup_status"]).replace("_", " ")}), '
          f'so matching assumes it emerged {NOMINAL_EMERGENCE_DAYS} days after the planting date you entered.</div>')
@@ -2035,6 +2107,24 @@ with tab_s:
                      f'(a field-level composite — same ranking as a pixel median composite, far faster). Dashed line = reference (SI 1).</div>')
 
 # ---------------------------------------------------------------- Green-up
+with tab_g:
+    _lag_ = PINFO.get("my_lag_days")
+    _how = "degree-days (heat units) from local weather" if PINFO.get("method") == "degree-days" else "days"
+    html('<div class="howstrip">'
+         f'<div class="hs"><div class="hn">1</div><div><b>You entered planting · {R["planting"]:%b %d}</b><br>'
+         'This date sets the season stage, the ★ index and the match window.</div></div>'
+         f'<div class="hs"><div class="hn">2</div><div><b>Satellite: your field greened up · {anchor:%b %d}</b><br>'
+         + (f'{_lag_} days later. ' if _lag_ is not None else 'Not visible — a typical delay is assumed. ')
+         + ({"confirmed": f'A typical delay — this <b>confirms your date</b>, and the timing (in {_how}) is learned from <i>your</i> field for this season.',
+             "partly": f'The timing (in {_how}) blends your field ({PINFO.get("cal_weight", 0) * 100:.0f}%) with the {R["crop"]} default, '
+                       'because the green-up was blurred or the delay unusual.'}.get(PINFO.get("cal_state"),
+                                                                                    f'Typical {R["crop"]} timing (in {_how}) is used — your field could not confirm it.'))
+         + '</div></div>'
+         f'<div class="hs"><div class="hn">3</div><div><b>Neighbours dated the same way</b><br>Each neighbour\'s green-up is turned back into '
+         f'a planting date; those planted within <b>± {window} days</b> of yours'
+         + (' — counted in heat units, so they are at the same crop stage —' if HEAT_MATCH else '')
+         + ' are comparable (green shading below).</div></div>'
+         '</div>')
 with tab_g, card():
     if gts.empty:
         st.info("No clear observations in the green-up window.")
@@ -2044,7 +2134,8 @@ with tab_g, card():
             ranked_line = IMG_DATE is not None and ranked is not None and pd.notna(mr["rank"])
             gi_ = segmented("Green-up index", ["NDVI", "EVI2"], "NDVI", "gu_index") if "evi2" in gts else "NDVI"
             gcol_ = gi_.lower()
-            html(f'<div class="ctitle">{gi_} after planting</div><div class="csub">blue = my field · green = comparable fields · shaded = my green-up ± the planting match'
+            html(f'<div class="ctitle">{gi_} after planting</div><div class="csub">blue = my field · green = comparable fields · '
+                 f'black dashed = the planting date you entered, shaded ± {window} days (the planting match) · blue dashed = my green-up'
                  + (f' · <b style="color:#ea580c">orange line = the image my field is ranked on ({IMG_DATE:%b %d})</b>' if ranked_line else
                     ' · rank my field to mark the ranking date here') + '</div>')
             g_src = gts[["field_id", "date", gcol_] + (["sensor"] if "sensor" in gts else [])].rename(columns={gcol_: "ndvi"})
@@ -2058,9 +2149,12 @@ with tab_g, card():
                 gp["sensor"] = "S2"
             gp["sensor"] = gp["sensor"].fillna("S2").map({"S2": "Sentinel-2", "L89": "Landsat (adjusted)"}).fillna("Sentinel-2")
             sc_ = alt.Scale(domain=["my field", "comparable", "other"], range=[BLUE, "#16a34a", "#e2e8f0"])
-            band = alt.Chart(pd.DataFrame({"s": [anchor - pd.Timedelta(days=window)], "e": [anchor + pd.Timedelta(days=window)]})).mark_rect(opacity=0.12, color="#16a34a").encode(x="s:T", x2="e:T")
+            _pl = pd.Timestamp(R["planting"])
+            band = alt.Chart(pd.DataFrame({"s": [_pl - pd.Timedelta(days=window)], "e": [_pl + pd.Timedelta(days=window)],
+                                           "t": [f"planted ± {window} d"]})).mark_rect(opacity=0.14, color="#16a34a").encode(
+                x="s:T", x2="e:T", tooltip=alt.Tooltip("t:N", title=""))
             ln = alt.Chart(gp[gp["field_id"] != "MY_FIELD"]).mark_line(opacity=0.45, strokeWidth=1).encode(
-                x=alt.X("date:T", title=None), y=alt.Y("ndvi:Q", title=gi_, scale=alt.Scale(domain=[0, 1])), detail="field_id:N",
+                x=alt.X("date:T", title=None, axis=alt.Axis(format="%b %d")), y=alt.Y("ndvi:Q", title=gi_, scale=alt.Scale(domain=[0, 1])), detail="field_id:N",
                 color=alt.Color("group:N", scale=sc_, legend=alt.Legend(title=None, orient="top")))
             my_ = gp[gp["field_id"] == "MY_FIELD"]
             mine = (alt.Chart(my_).mark_line(strokeWidth=3.5).encode(x="date:T", y="ndvi:Q", color=alt.Color("group:N", scale=sc_, legend=None))
@@ -2113,7 +2207,7 @@ with tab_d, card():
             D[c_] = D["field_id"].map(T.set_index("field_id")[c_])
     cols = [c for c in ["rank", "short", "where", "status", "note", "reference", "obs_date", "vi_raw", "calibration", "vi_median", "SI",
                         "cons_rank", "cons_score"] + [f"rank_{v}" for v in G.ALL_VI] + [
-                        "est_planting", "plant_unc", "plant_conf", "plant_why", "delta_days", "greenup_date", "onset_ndvi", "onset_evi2", "lag_days",
+                        "est_planting", "plant_unc", "plant_conf", "plant_why", "delta_days", "delta_match", "greenup_date", "onset_ndvi", "onset_evi2", "lag_days",
                         "lat", "lon", "acres", "elev_median", "texture", "irrigated", "field_id"] if c in D]
     D = D[cols].sort_values("rank" if "rank" in cols else "status", na_position="last")
     for c_ in ("obs_date", "est_planting", "greenup_date", "onset_ndvi", "onset_evi2"):
@@ -2122,7 +2216,7 @@ with tab_d, card():
     if "plant_conf" in D:
         D["plant_conf"] = D["plant_conf"].map({"high": "well dated", "low": "roughly dated"})
     D = D.rename(columns={"cons_rank": "◎ consensus rank", "cons_score": "◎ score /100", **{f"rank_{v}": f"rank {v}" for v in G.ALL_VI},
-                          "short": "field", "field_id": "CSB id", "delta_days": "planted Δ days vs mine", "plant_unc": "planting ± days",
+                          "short": "field", "field_id": "CSB id", "delta_days": "planted Δ days vs mine", "delta_match": "planted Δ heat-unit days (used to match)", "plant_unc": "planting ± days",
                           "plant_conf": "planting date", "plant_why": "why roughly dated", "greenup_date": "green-up",
                           "onset_ndvi": "green-up (NDVI)", "onset_evi2": "green-up (EVI2)", "lag_days": "planting → green-up days", "elev_median": "elevation m", "obs_date": "image date",
                           "vi_raw": f"{VI} (raw)", "calibration": "image calibration",
