@@ -757,3 +757,88 @@ def hls_series(fields, start: dt.date, end: dt.date, workers: int | None = None,
     if len(df):     # a field seen on two overlapping tiles the same day: keep the look with the most clear pixels
         df = df.sort_values("n_pix", ascending=False).drop_duplicates(["field_id", "date", "sensor"]).sort_values(["field_id", "date"])
     return df.reset_index(drop=True), len(items), used
+
+
+# ============================================================================ Sentinel-1 radar (cloud-gap filling)
+# Radar sees through clouds. Per field: median VV and VH backscatter (gamma-0, terrain-corrected) of the interior
+# pixels, from Planetary Computer's Sentinel-1 RTC. Only used to estimate NDVI inside long optical gaps (cohort.radar_fill).
+S1_KIND = "s1rtc"
+
+
+def _s1_searcher(b, s_, e_):
+    items = list(_pc_client().search(collections=["sentinel-1-rtc"], bbox=b, datetime=f"{s_}/{e_}").items())
+    return sorted(items, key=lambda it: it.datetime)
+
+
+def _utm_epsg(bbox) -> int:
+    lon = (bbox[0] + bbox[2]) / 2; lat = (bbox[1] + bbox[3]) / 2
+    return (32600 if lat >= 0 else 32700) + int((lon + 180) // 6) + 1
+
+
+def _s1_scene(item, ids, bbox, labels: _LabelStore, epsg: int):
+    import odc.stac
+    import planetary_computer as pc
+    from .imagery import _zonal
+    cols = ["cache_id", "n_pix", "vv", "vh"]
+    cached = _read_cache(S1_KIND, item.id)
+    have = cached[cached["cache_id"].isin(ids)] if cached is not None else pd.DataFrame(columns=cols)
+    todo = np.flatnonzero(~np.isin(ids, have["cache_id"].values))
+    if len(todo) == 0:
+        return have
+    n = len(ids)
+    mvv = np.full(n, np.nan); mvh = np.full(n, np.nan); cnt = np.zeros(n, int)
+    for grp in labels.windows(todo, 10, C.MAX_WINDOW_PX):
+        ds = odc.stac.load([item], bands=["vv", "vh"], bbox=labels.bounds(grp), crs=f"EPSG:{epsg}", resolution=10, chunks=None,
+                           groupby="solar_day", fail_on_error=True, patch_url=pc.sign).isel(time=0)
+        lab = labels.get(ds, subset=grp)
+        vv = ds["vv"].values.astype("float32"); vh = ds["vh"].values.astype("float32")
+        keep = (lab > 0) & np.isfinite(vv) & np.isfinite(vh) & (vv > 0) & (vh > 0)
+        lab1 = lab[keep]; ok_ = np.ones(int(keep.sum()), bool)
+        a_, _, _, c = _zonal(vv[keep], lab1, n, ok_)
+        b_, _, _, _ = _zonal(vh[keep], lab1, n, ok_)
+        g_ = c > 0
+        mvv[g_], mvh[g_], cnt[g_] = a_[g_], b_[g_], c[g_]
+        del ds, vv, vh, lab
+    ok = cnt[todo] >= 20
+    new = pd.DataFrame({"cache_id": ids[todo], "n_pix": cnt[todo].astype(int),
+                        "vv": np.where(ok, mvv[todo], np.nan), "vh": np.where(ok, mvh[todo], np.nan)})
+    _write_cache(S1_KIND, item.id, new)
+    return pd.concat([have, new], ignore_index=True)
+
+
+def s1_series(fields, start: dt.date, end: dt.date, workers: int | None = None, progress=None, log=print):
+    """Per-field median VV / VH (linear gamma-0) for every Sentinel-1 pass over `fields`.
+    Returns DataFrame[field_id, date, vv, vh, n, orbit]."""
+    progress = progress or (lambda f, m: None)
+    workers = min(workers or C.WORKERS, 3)
+    bbox = tuple(fields.total_bounds)
+    ids = cache_ids(fields)
+    m = dict(zip(ids, fields["field_id"].astype(str).values))
+    items = _search(bbox, start.isoformat(), end.isoformat(), collection="s1rtc", searcher=_s1_searcher,
+                    tile_of=lambda it: it.id)          # consecutive frames of one pass can both cover the area: keep both
+    progress(0.0, f"Radar (Sentinel-1) · {len(items)} passes")
+    labels = _LabelStore(fields["geometry_inner"]); epsg = _utm_epsg(bbox)
+    out = []
+    ex = ThreadPoolExecutor(max_workers=workers)
+    try:
+        futs = {ex.submit(_s1_scene, it, ids, bbox, labels, epsg): it for it in items}
+        for i, fu in enumerate(as_completed(futs)):
+            it = futs[fu]
+            try:
+                df = fu.result()
+            except Exception as e:
+                log(f"  skip {it.id}: {e}"); continue
+            ts_ = pd.Timestamp(it.datetime)
+            date = (ts_.tz_convert(None) if ts_.tzinfo else ts_).normalize()
+            good = df[pd.to_numeric(df["vh"], errors="coerce").notna()]
+            out.append(good.assign(field_id=good["cache_id"].map(m), date=date, orbit=it.properties.get("sat:relative_orbit")))
+            progress((i + 1) / max(len(items), 1), f"Radar · {i + 1}/{len(items)} passes · {date.date()}")
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+    cols = ["field_id", "date", "vv", "vh", "n", "orbit"]
+    if not out:
+        return pd.DataFrame(columns=cols)
+    df = pd.concat(out, ignore_index=True).rename(columns={"n_pix": "n"})
+    df = _numeric(df.reindex(columns=cols), ["vv", "vh", "n"])
+    # one value per field and day (a field on the edge of two passes the same day: keep the one with more pixels)
+    return df.sort_values("n", ascending=False).drop_duplicates(["field_id", "date"]).sort_values(["field_id", "date"]).reset_index(drop=True)

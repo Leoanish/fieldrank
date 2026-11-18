@@ -46,6 +46,7 @@ GDD_TYPICAL = (0.6, 1.7)            # … and called a clear confirmation within
 CAL_WEIGHT = {("high", True): 1.0, ("high", False): 0.7, ("low", True): 0.7, ("low", False): 0.4}
 HIGH_MAX_GAP = 15                   # clear images ≤ 15 d apart around the green-up → about ± 1 week
 TEMPLATE_MAX_GAP = 35   # a cloud gap up to this long is bridged when the field has ≥ 2 looks on its rise after it
+RISE_MAX_GAP = 20       # longest optical gap allowed anywhere from 10 days before to 30 days after green-up for "well dated"
 HIGH_MIN_RISE = 0.12
 HIGH_MIN_MONO = 0.6
 AGREE = 6                           # NDVI vs EVI2 green-up, days
@@ -65,6 +66,11 @@ def plant_confidence(row) -> str | None:
 def _low_reasons(row) -> list[str]:
     r = []
     m_ = row.get("method", "curve")
+    rg = row.get("rise_gap")
+    if pd.notna(rg) and rg > RISE_MAX_GAP:
+        r.append(f"a {int(rg)}-day cloud gap during the rise")
+    if (row.get("radar_looks") or 0) > 0:
+        r.append(f"green-up timed with {int(row.get('radar_looks'))} radar look(s) in a {int(row.get('gap_days') or 0)}-day cloud gap (±~7 days)")
     tmpl_ok = m_ == "template" and bool(row.get("constrained")) and pd.notna(row.get("gap_days")) and row.get("gap_days") <= TEMPLATE_MAX_GAP
     if m_ == "template" and not tmpl_ok:
         r.append("green-up hidden by clouds — timed from the neighbours' curve with few looks on the rise")

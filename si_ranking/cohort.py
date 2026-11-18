@@ -30,7 +30,7 @@ import pandas as pd
 from . import config as C
 from .imagery import _rasterize_fields, _zonal  # noqa: F401  (Landsat tier)
 
-CACHE_VERSION = "v10-hls"   # bump when detector/search changes -> old caches ignored
+CACHE_VERSION = "v12-radar-gate"   # bump when detector/search changes -> old caches ignored
 GREENUP_DELTA = 0.10           # rise above bare-soil baseline that marks green-up
 GREENUP_CONFIRM_ABS = 0.28     # canopy must reach this NDVI ...
 GREENUP_CONFIRM_REL = 0.15     # ... and baseline + this, to count as a real crop
@@ -325,6 +325,119 @@ def detect_greenup(s: pd.DataFrame, planting: dt.date | None = None) -> dict:
     return out
 
 
+# ----------------------------------------------------------------------------- radar gap filling (Sentinel-1)
+RADAR_GAP = 20            # optical gaps longer than this (days) get radar-estimated looks
+# Gate set from real-data tests (2025, hide HLS looks around known green-ups, 3 random gap layouts each):
+#   cotton R² 0.90 → green-up error 11.9 → 5.8 d · peanut R² 0.89 → 5.7 → 4.7 d · corn R² 0.83 → 3.7 → 4.3 d (worse)
+RADAR_MIN_R2 = 0.85       # the season's radar → NDVI model must explain at least this much, on fields it has not seen
+RADAR_MAX_RMSE = 0.12      # … with an NDVI error of at most this
+RADAR_MAX_RAIN = 25.0     # mm in the 2 days before a pass: soaked soil drowns the crop signal → that pass is not used
+
+
+def _radar_X(d: pd.DataFrame) -> np.ndarray:
+    vh, vv = 10 * np.log10(d["vh"].clip(lower=1e-5)), 10 * np.log10(d["vv"].clip(lower=1e-5))
+    cr = vh - vv
+    rain = d["rain2"].fillna(0).clip(upper=40) / 10.0 if "rain2" in d else np.zeros(len(d))
+    return np.c_[np.ones(len(d)), vh, vv, cr, vh ** 2, cr ** 2, vh * cr, rain, rain * vh]
+
+
+RADAR_LOW_WEIGHT = 5.0    # pairs in the green-up range (NDVI < 0.5) weigh 5× in the fit: removes most of the early bias
+
+
+def _ridge(A, y, lam=0.5, w=None):
+    if w is None:
+        return np.linalg.solve(A.T @ A + lam * np.eye(A.shape[1]), A.T @ y)
+    Aw = A * w[:, None]
+    return np.linalg.solve(A.T @ Aw + lam * np.eye(A.shape[1]), Aw.T @ y)
+
+
+def radar_fill(ts: pd.DataFrame, s1: pd.DataFrame, wx: pd.DataFrame | None = None, gap_min: int = RADAR_GAP):
+    """Sentinel-1 (radar, sees through clouds) → estimated NDVI / EVI2 inside long optical gaps.
+    The radar → NDVI relationship is learned for THIS area, crop and season from every field seen by both on (almost)
+    the same day (±2 days), checked on fields left out of the fit, and only used when it holds (R² ≥ 0.6, error ≤ 0.10).
+    Radar values are only added where optical is missing for > `gap_min` days and never within 3 days of an optical look.
+    Returns (ts with extra rows sensor='S1', info)."""
+    info = {"radar_r2": None, "radar_rmse": None, "radar_added": 0, "radar_fields": 0, "radar_pairs": 0, "radar_used": False}
+    if s1 is None or not len(s1) or ts is None or not len(ts):
+        return ts, info
+    s1 = s1.copy(); s1["date"] = pd.to_datetime(s1["date"])
+    if wx is not None and len(wx) and "prcp_mm" in wx:
+        w = pd.Series(wx["prcp_mm"].values, index=pd.to_datetime(wx["date"]))
+        s1["rain2"] = [float(w.get(d_ - pd.Timedelta(days=1), 0) or 0) + float(w.get(d_, 0) or 0) for d_ in s1["date"]]
+    else:
+        s1["rain2"] = 0.0
+    h = ts.dropna(subset=["ndvi"])[["field_id", "date", "ndvi", "evi2"]].copy(); h["date"] = pd.to_datetime(h["date"])
+    P = []
+    for k in (0, -1, 1, -2, 2):
+        m = s1.assign(date=s1["date"] + pd.Timedelta(days=k)).merge(h, on=["field_id", "date"]); m["lag"] = abs(k); P.append(m)
+    P = pd.concat(P).sort_values("lag").drop_duplicates(["field_id", "date"]) if P else pd.DataFrame()
+    P = P[P["rain2"] <= RADAR_MAX_RAIN]
+    info["radar_pairs"] = int(len(P))
+    if len(P) < 150 or P["field_id"].nunique() < 25:
+        return ts, info
+    fids = P["field_id"].unique(); grp = dict(zip(fids, np.random.default_rng(0).integers(0, 5, len(fids))))
+    g = P["field_id"].map(grp).values
+    pred = np.zeros(len(P))
+    A_all = _radar_X(P)
+    wt = np.where(P["ndvi"].values < 0.5, RADAR_LOW_WEIGHT, 1.0)        # the green-up range decides the date
+    for k in range(5):
+        tr = g != k
+        pred[~tr] = A_all[~tr] @ _ridge(A_all[tr], P["ndvi"].values[tr], w=wt[tr])
+    res = P["ndvi"].values - pred
+    r2 = float(1 - np.var(res) / np.var(P["ndvi"].values)); rmse = float(np.sqrt(np.mean(res ** 2)))
+    info.update(radar_r2=round(r2, 3), radar_rmse=round(rmse, 3))
+    if r2 < RADAR_MIN_R2 or rmse > RADAR_MAX_RMSE:
+        return ts, info
+    w_n = _ridge(A_all, P["ndvi"].values, w=wt)
+    ev = P["evi2"].notna().values
+    w_e = _ridge(A_all[ev], P["evi2"].values[ev], w=wt[ev]) if ev.sum() >= 100 else None
+    # radar looks that fall inside long optical gaps of each field
+    add = []
+    hd = {k_: np.sort(g_["date"].values) for k_, g_ in h.groupby("field_id")}
+    s1u = s1[s1["rain2"] <= RADAR_MAX_RAIN]
+    for fid_, gs in s1u.groupby("field_id"):
+        od = hd.get(fid_)
+        if od is None or len(od) < 2:
+            continue
+        gaps = np.diff(od).astype("timedelta64[D]").astype(int)
+        for j in np.flatnonzero(gaps > gap_min):
+            a_, b_ = od[j], od[j + 1]
+            sel = gs[(gs["date"].values > a_ + np.timedelta64(3, "D")) & (gs["date"].values < b_ - np.timedelta64(3, "D"))]
+            if len(sel):
+                A = _radar_X(sel)
+                add.append(pd.DataFrame({"field_id": fid_, "date": sel["date"].values, "ndvi": np.clip(A @ w_n, 0, 1),
+                                         "evi2": np.clip(A @ w_e, 0, 1) if w_e is not None else np.nan,
+                                         "n_pix": sel["n"].values if "n" in sel else 0, "sensor": "S1"}))
+    if add:
+        extra = pd.concat(add, ignore_index=True)
+        info.update(radar_added=int(len(extra)), radar_fields=int(extra["field_id"].nunique()), radar_used=True)
+        ts = pd.concat([ts, extra.reindex(columns=ts.columns)], ignore_index=True).sort_values(["field_id", "date"]).reset_index(drop=True)
+    return ts, info
+
+
+def _maybe_radar(ts, fields, planting, days_before, days_after, wx, log, progress):
+    """Fetch Sentinel-1 only if a field has an optical gap > RADAR_GAP days between planting − 10 d and planting + 60 d
+    (when crops come up); then fill those gaps with the area's own radar → NDVI estimate."""
+    lo, hi = pd.Timestamp(planting) - pd.Timedelta(days=10), pd.Timestamp(planting) + pd.Timedelta(days=60)
+    need = 0
+    for _, g in ts.dropna(subset=["ndvi"]).groupby("field_id"):
+        d_ = np.sort(pd.to_datetime(g["date"]).values)
+        d_ = np.concatenate([[np.datetime64(lo)], d_[(d_ >= np.datetime64(lo)) & (d_ <= np.datetime64(hi))], [np.datetime64(hi)]])
+        if (np.diff(d_).astype("timedelta64[D]").astype(int) > RADAR_GAP).any():
+            need += 1
+    if need == 0:
+        return ts, {"radar_checked": True, "radar_needed_fields": 0}
+    from . import scenes
+    start = planting - dt.timedelta(days=days_before); end = min(planting + dt.timedelta(days=days_after), dt.date.today())
+    log(f"Radar: {need} fields have > {RADAR_GAP}-day cloud gaps — reading Sentinel-1")
+    progress(0.9, f"Radar (Sentinel-1) for {need} fields with long cloud gaps…")
+    s1 = scenes.s1_series(fields, start, end, log=log, progress=lambda f, m: progress(0.9 + 0.05 * f, m))
+    ts2, info = radar_fill(ts, s1, wx)
+    info.update(radar_checked=True, radar_needed_fields=int(need), radar_passes=int(s1["date"].nunique()) if len(s1) else 0)
+    log(f"Radar: model R² {info.get('radar_r2')} · error {info.get('radar_rmse')} · added {info.get('radar_added')} looks")
+    return ts2, info
+
+
 TEMPLATE_GAP = 12       # green-up inside a cloud gap longer than this → re-timed with the neighbours' curve shape
 TEMPLATE_MIN_REF = 5    # well-dated neighbours needed to learn that shape
 
@@ -398,19 +511,56 @@ def _detect_all(ts: pd.DataFrame, fields: gpd.GeoDataFrame, planting) -> pd.Data
         g = groups.get(fid_, pd.DataFrame(columns=["date", "ndvi", "evi2", "sensor"]))
         d = detect_greenup(g.reindex(columns=["date", "ndvi", "evi2", "sensor"]), planting)
         d["field_id"] = fid_; recs.append(d)
-    return _template_refit(pd.DataFrame(recs), groups, planting)
+    det = _template_refit(pd.DataFrame(recs), groups, planting)
+    # radar-estimated looks narrow the gap but are not as exact as optical ones: record the optical gap and how many
+    # radar looks sit in it, so the rating stays honest (radar-bridged green-ups are 'roughly dated', ±~7 days)
+    det["radar_looks"] = 0
+    det["rise_gap"] = np.nan
+    # the longest optical gap across the whole rise (10 days before → 30 days after green-up): a gap anywhere there can move
+    # the date — the curve may place green-up just before the gap, where looks are dense and the date only LOOKS sure
+    for ix in det.index[det["greenup_date"].notna()]:
+        g = groups.get(det.at[ix, "field_id"])
+        if g is None:
+            continue
+        on = pd.Timestamp(det.at[ix, "greenup_date"])
+        od = np.sort(pd.to_datetime(g.loc[(g.get("sensor", pd.Series("", index=g.index)) != "S1") & g["ndvi"].notna(), "date"]).values)
+        lo_, hi_ = np.datetime64(on - pd.Timedelta(days=10)), np.datetime64(on + pd.Timedelta(days=30))
+        inner = od[(od > lo_) & (od < hi_)]
+        before, after_ = od[od <= lo_], od[od >= hi_]
+        edges = np.concatenate([before[-1:] if len(before) else [lo_], inner, after_[:1] if len(after_) else [hi_]])
+        det.at[ix, "rise_gap"] = int(np.diff(edges).astype("timedelta64[D]").astype(int).max()) if len(edges) > 1 else np.nan
+    for ix in det.index[det["greenup_date"].notna()]:
+        g = groups.get(det.at[ix, "field_id"])
+        if g is None or "sensor" not in g or not (g["sensor"] == "S1").any():
+            continue
+        on = pd.Timestamp(det.at[ix, "greenup_date"])
+        od = pd.to_datetime(g.loc[(g["sensor"] != "S1") & g["ndvi"].notna(), "date"])
+        b_, a_ = od[od <= on], od[od > on]
+        if len(b_) and len(a_):
+            lo_, hi_ = b_.max(), a_.min()
+            det.at[ix, "gap_days"] = int((hi_ - lo_).days)
+            rd = pd.to_datetime(g.loc[g["sensor"] == "S1", "date"])
+            det.at[ix, "radar_looks"] = int(((rd > lo_) & (rd < hi_)).sum())
+    return det
 
 
 # ----------------------------------------------------------------------------- orchestration
 def planting_cohort(fields: gpd.GeoDataFrame, target_id: str, planting: dt.date, window_days: int = 10,
                     log=print, use_cache: bool = True, progress=None, allow_landsat: bool = True,
-                    days_before: int = DAYS_BEFORE, days_after: int = DAYS_AFTER, match_irrigation: bool = False):
+                    days_before: int = DAYS_BEFORE, days_after: int = DAYS_AFTER, match_irrigation: bool = False,
+                    allow_radar: bool = True, wx: pd.DataFrame | None = None):
     """Returns (detections DataFrame, info dict, raw NDVI series DataFrame)."""
     progress = progress or (lambda f, m: None)
     key = _cache_key(fields, planting)
     p = C.TS_DIR / f"greenup_{key}.parquet"
-    source = "Sentinel-2"; hls_note = ""
+    source = "Sentinel-2"; hls_note = ""; radar = {}
+    pj = p.with_suffix(".radar.json")
     if use_cache and p.exists():
+        try:
+            import json as _json
+            radar = _json.loads(pj.read_text()) if pj.exists() else {}
+        except Exception:
+            radar = {}
         ts = pd.read_parquet(p)
         if "sensor" not in ts:
             ts["sensor"] = "S2"
@@ -429,6 +579,18 @@ def planting_cohort(fields: gpd.GeoDataFrame, target_id: str, planting: dt.date,
                 log(f"HLS unavailable ({hls_note}) — using Sentinel-2"); ts = None
         if ts is None:
             ts, n_s2 = _s2_series(fields, planting, days_before, days_after, log, progress); n_l = 0
+        # radar: only when some field's optical looks leave a long gap around the time crops come up
+        if allow_radar and len(ts):
+            try:
+                ts, radar = _maybe_radar(ts, fields, planting, days_before, days_after, wx, log, progress)
+            except Exception as e:
+                radar = {"radar_note": f"{type(e).__name__}: {str(e)[:160]}"}
+                log(f"radar unavailable ({radar['radar_note']})")
+            try:
+                import json as _json
+                pj.write_text(_json.dumps(radar, default=str))
+            except Exception:
+                pass
     progress(0.96, f"Detecting green-up ({'HLS: Sentinel-2 + Landsat' if source == 'HLS' else 'Sentinel-2'})…")
     det = _detect_all(ts, fields, planting)
     tgt = det[det["field_id"] == target_id].iloc[0]
@@ -469,7 +631,7 @@ def planting_cohort(fields: gpd.GeoDataFrame, target_id: str, planting: dt.date,
         det["in_window"] = det["in_window"] & (det["irrigated"].eq(mine) | det["field_id"].eq(target_id))
     det["ref_ok"] = det["in_window"] & (det["confidence"] >= CONF_MED)
     info = {"anchor_greenup": anchor, "anchor_source": anchor_src, "anchor_observed": bool(anchor_obs), "n_scenes": int(n_s2), "n_landsat": int(n_l),
-            "tier2": bool(need_l), "tier2_reason": tier2_reason, "landsat_cal": ls_cal, "source": source, "hls_note": hls_note,
+            "tier2": bool(need_l), "tier2_reason": tier2_reason, "landsat_cal": ls_cal, "source": source, "hls_note": hls_note, "radar": radar,
             "n_detected": int(det["greenup_date"].notna().sum()), "n_in_window": int(det["in_window"].sum()),
             "n_high": int((det["conf_label"] == "high").sum()), "n_medium": int((det["conf_label"] == "medium").sum()),
             "n_low": int((det["conf_label"] == "low").sum()),

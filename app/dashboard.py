@@ -660,6 +660,10 @@ with st.sidebar:
         allow_l = st.toggle("Green-up from HLS (Sentinel-2 + Landsat)", value=True,
                             help="NASA's Harmonized Landsat Sentinel-2: both satellites on one 30 m grid, a look about every 1.6 days. "
                                  "Off = native Sentinel-2 only (fewer looks in cloudy springs).")
+        allow_r = st.toggle("Fill long cloud gaps with radar (Sentinel-1)", value=True,
+                            help="Radar sees through clouds. When a field has no clear optical look for > 20 days around green-up, "
+                                 "radar passes inside that gap are turned into estimated NDVI — with a radar → NDVI relationship "
+                                 "learned for this area and season, used only when it holds on fields left out (R² ≥ 0.85).")
         max_days = st.slider("Look back for a clear image (days)", 5, 60, 30)
         q = st.slider("Reference quantile", 0.80, 0.99, C.VIRTUAL_REF_QUANTILE, 0.01)
         CACHE.prune()                                   # keeps the imagery cache under its size budget (checks every 5 min)
@@ -1033,7 +1037,12 @@ if process:
     ss._cancel_evt = threading.Event()                 # set by ■ Stop → the background profile job stops too
     fut_prof = pool.submit(field_profiles, allf, lambda s: None, None, 3, True, ss._cancel_evt)
     try:
-        coh, info, gts = run_heavy(prog, planting_cohort, allf, "MY_FIELD", planting, window, log=lambda s: None, progress=prog, allow_landsat=allow_l)
+        try:                                  # weather first: rain matters for reading radar
+            wx_pre = PD.weather_for(c.x, c.y, planting, log=lambda s_: None)
+        except Exception:
+            wx_pre = None
+        coh, info, gts = run_heavy(prog, planting_cohort, allf, "MY_FIELD", planting, window, log=lambda s: None, progress=prog,
+                                   allow_landsat=allow_l, allow_radar=allow_r, wx=wx_pre)
     except Exception as e:
         ss._cancel_evt.set(); pool.shutdown(wait=False)
         outage(status, "read the satellite images", e)
@@ -1061,7 +1070,7 @@ if process:
     table = table.merge(prof.drop_duplicates("field_id"), on="field_id", how="left")
     table["irrigated"] = table["irrigated"].fillna(table["pivot_like"]).astype(bool)
     prog(0.995, "Estimating planting dates from green-up + local weather…")
-    wx = PD.weather_for(c.x, c.y, planting, log=lambda s_: None)
+    wx = wx_pre if wx_pre is not None else PD.weather_for(c.x, c.y, planting, log=lambda s_: None)
     pdet, pinfo = PD.estimate(coh, crop, planting, "MY_FIELD", wx)
     table = table.drop(columns=[c_ for c_ in ("est_planting",) if c_ in table]).merge(
         pdet[["field_id", "est_planting", "plant_lo", "plant_hi", "plant_unc", "plant_conf", "plant_why", "lag_days"] + (["delta_tdays"] if "delta_tdays" in pdet else [])], on="field_id", how="left")
@@ -2330,17 +2339,33 @@ with tab_g:
 with tab_g:                                   # which satellites timed the green-up, and how often my field was seen
     _src = info.get("source", "Sentinel-2")
     _mg = gts[gts["field_id"] == "MY_FIELD"] if len(gts) else gts
-    _md = pd.to_datetime(_mg["date"]).drop_duplicates().sort_values() if len(_mg) else pd.Series(dtype="datetime64[ns]")
+    _mo = _mg[_mg["sensor"] != "S1"] if len(_mg) and "sensor" in _mg else _mg                      # optical looks only
+    _md = pd.to_datetime(_mo["date"]).drop_duplicates().sort_values() if len(_mo) else pd.Series(dtype="datetime64[ns]")
     _gap = float(_md.diff().dt.days.median()) if len(_md) >= 2 else float("nan")
     _ns = int(_mg.loc[_mg["sensor"].isin(["S30", "S2"]), "date"].nunique()) if len(_mg) and "sensor" in _mg else 0
     _nl = int(_mg.loc[_mg["sensor"].isin(["L30", "L89"]), "date"].nunique()) if len(_mg) and "sensor" in _mg else 0
     _span = f"{_md.min():%b %d} – {_md.max():%b %d}" if len(_md) else ""
+    _rd = info.get("radar") or {}
+    _nr = int((_mg["sensor"] == "S1").sum()) if len(_mg) and "sensor" in _mg else 0
+    if _rd.get("radar_used"):
+        _radar_txt = (f' <br><b>📡 Radar filled cloud gaps:</b> {_rd.get("radar_added", 0)} estimated looks for {_rd.get("radar_fields", 0)} fields'
+                      + (f' ({_nr} for mine — amber ▼ on the chart)' if _nr else "")
+                      + f' · radar → NDVI learned here this season: R² {_rd.get("radar_r2")}, error ±{_rd.get("radar_rmse")} NDVI on fields left out. '
+                        'Green-ups timed with radar count as <i>roughly dated</i> (≈ ±7 days).')
+    elif _rd.get("radar_checked") and _rd.get("radar_needed_fields"):
+        _radar_txt = (f' <br>📡 Radar checked for {_rd["radar_needed_fields"]} fields with long cloud gaps, but radar did not track NDVI well enough '
+                      f'here this season (R² {_rd.get("radar_r2")}, error ±{_rd.get("radar_rmse")}) — not used.')
+    elif _rd.get("radar_note"):
+        _radar_txt = f' <br>📡 Radar could not be read this time ({_rd["radar_note"]}).'
+    else:
+        _radar_txt = ""
     if _src == "HLS":
         html(f'<div class="callout info"><b>🛰️ Green-up from NASA HLS</b> (Sentinel-2 + Landsat, harmonised, 30 m) · '
              f'area: {info.get("n_scenes", 0)} Sentinel-2 + {info.get("n_landsat", 0)} Landsat dates with clear fields · '
              f'<b>my field: {len(_md)} clear looks</b> ({_ns} Sentinel-2 + {_nl} Landsat) {_span}'
              + (f' · a look every <b>{_gap:.1f} days</b> (median)' if _gap == _gap else "")
-             + '. Satellites pass every ~1.6 days; cloudy passes are skipped, so clear looks are less frequent.</div>')
+             + '. Satellites pass every ~1.6 days; cloudy passes are skipped, so clear looks are less frequent.'
+             + _radar_txt + '</div>')
     else:
         html(f'<div class="callout warn"><b>Green-up from Sentinel-2 only</b> (10 m) · my field: {len(_md)} clear looks'
              + (f', one every {_gap:.1f} days' if _gap == _gap else "") + '. '
@@ -2370,7 +2395,7 @@ with tab_g, card():
             gp["group"] = np.where(gp["field_id"] == "MY_FIELD", "my field", np.where(gp["category"].eq("comparable"), "comparable", "other"))
             if "sensor" not in gp:
                 gp["sensor"] = "S2"
-            gp["sensor"] = gp["sensor"].fillna("S2").map({"S2": "Sentinel-2 10 m", "S30": "HLS Sentinel-2", "L89": "Landsat", "L30": "HLS Landsat"}).fillna("Sentinel-2 10 m")
+            gp["sensor"] = gp["sensor"].fillna("S2").map({"S2": "Sentinel-2 10 m", "S30": "HLS Sentinel-2", "L89": "Landsat", "L30": "HLS Landsat", "S1": "Radar estimate"}).fillna("Sentinel-2 10 m")
             sc_ = alt.Scale(domain=["my field", "comparable", "comparable · median", "other fields"], range=[BLUE, "#16a34a", "#14532d", "#cbd5e1"])
             gp["group"] = gp["group"].replace({"other": "other fields"})
             _pl = pd.Timestamp(R["planting"])
@@ -2399,12 +2424,16 @@ with tab_g, card():
             mine = (alt.Chart(my_).mark_line(strokeWidth=3.5).encode(x="date:T", y="ndvi:Q", color=alt.Color("group:N", scale=sc_, legend=None))
                     + alt.Chart(my_).mark_point(size=70, filled=True, strokeWidth=2).encode(
                         x="date:T", y="ndvi:Q", color=alt.value(BLUE),
-                        shape=alt.Shape("sensor:N", scale=alt.Scale(domain=[k_ for k_ in ["HLS Sentinel-2", "HLS Landsat", "Sentinel-2 10 m", "Landsat"] if k_ in set(my_["sensor"])],
-                                                                    range=[v_ for k_, v_ in zip(["HLS Sentinel-2", "HLS Landsat", "Sentinel-2 10 m", "Landsat"],
-                                                                                                ["circle", "diamond", "square", "triangle-up"]) if k_ in set(my_["sensor"])]),
+                        shape=alt.Shape("sensor:N", scale=alt.Scale(domain=[k_ for k_ in ["HLS Sentinel-2", "HLS Landsat", "Sentinel-2 10 m", "Landsat", "Radar estimate"] if k_ in set(my_["sensor"])],
+                                                                    range=[v_ for k_, v_ in zip(["HLS Sentinel-2", "HLS Landsat", "Sentinel-2 10 m", "Landsat", "Radar estimate"],
+                                                                                                ["circle", "diamond", "square", "triangle-up", "triangle-down"]) if k_ in set(my_["sensor"])]),
                                         legend=None),
-                        fill=alt.condition(alt.datum.sensor == "HLS Landsat", alt.value("#ffffff"), alt.value(BLUE)),
+                        fill=alt.condition((alt.datum.sensor == "HLS Landsat") | (alt.datum.sensor == "Radar estimate"), alt.value("#ffffff"), alt.value(BLUE)),
                         tooltip=[alt.Tooltip("date:T", format="%b %d"), alt.Tooltip("ndvi:Q", format=".3f", title=gi_), alt.Tooltip("sensor:N")]))
+            if (my_["sensor"] == "Radar estimate").any():        # radar looks: large amber triangles, clearly not optical
+                mine = mine + alt.Chart(my_[my_["sensor"] == "Radar estimate"]).mark_point(shape="triangle-down", size=150, filled=True,
+                                                                                          color="#f59e0b", stroke="#78350f", strokeWidth=1).encode(
+                    x="date:T", y="ndvi:Q", tooltip=[alt.Tooltip("date:T", format="%b %d"), alt.Tooltip("ndvi:Q", format=".3f", title=f"{gi_} (radar estimate)")])
             rules = alt.Chart(pd.DataFrame({"x": [pd.Timestamp(R["planting"]), anchor], "l": ["planting", "my green-up"]})).mark_rule(strokeDash=[5, 4], strokeWidth=2).encode(
                 x="x:T", color=alt.Color("l:N", scale=alt.Scale(domain=["planting", "my green-up"], range=[INK, BLUE]), legend=None))
             layers = band + ln + mine + rules
@@ -2414,8 +2443,8 @@ with tab_g, card():
                 layers = (layers + alt.Chart(rk_).mark_rule(color="#ea580c", strokeWidth=3).encode(x="x:T")
                           + alt.Chart(rk_).mark_text(align="right", dx=-6, dy=4, fontSize=11, fontWeight="bold", color="#ea580c").encode(x="x:T", y="y:Q", text="t:N"))
             st.altair_chart(layers.resolve_scale(color="independent").properties(height=360).configure_view(strokeWidth=0), use_container_width=True)
-            _sens = [k_ for k_ in ["HLS Sentinel-2", "HLS Landsat", "Sentinel-2 10 m", "Landsat"] if k_ in set(my_["sensor"])]
-            _shape = {"HLS Sentinel-2": "●", "HLS Landsat": "◇", "Sentinel-2 10 m": "■", "Landsat": "▲"}
+            _sens = [k_ for k_ in ["HLS Sentinel-2", "HLS Landsat", "Sentinel-2 10 m", "Landsat", "Radar estimate"] if k_ in set(my_["sensor"])]
+            _shape = {"HLS Sentinel-2": "●", "HLS Landsat": "◇", "Sentinel-2 10 m": "■", "Landsat": "▲", "Radar estimate": '<span style="color:#f59e0b">▼</span>'}
             html('<div class="legend">'
                  f'<span><i class="ln" style="background:{BLUE}"></i>my field</span>'
                  '<span><i class="ln" style="background:#16a34a"></i>comparable</span>'
