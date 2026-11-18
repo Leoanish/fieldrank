@@ -159,10 +159,14 @@ div[data-testid="stDataFrame"] { border-radius:14px; overflow:hidden; }
 .callout.err { background:#fef2f2; border:1px solid #fecaca; color:#991b1b; }
 .callout.info { background:#eff6ff; border:1px solid #bfdbfe; color:#1e3a8a; }
 .callout.ok { background:#f0fdf4; border:1px solid #bbf7d0; color:#14532d; }
+.nw { white-space:nowrap; }
+.legend i.ln { display:inline-block; width:16px; height:3px; border-radius:2px; vertical-align:middle; margin-right:5px; }
+.legend i.ln.dash { height:0; border-top:2px dashed; background:none; }
 .pick { font-size:.8rem; background:#fefce8; border:1px solid #fde68a; border-radius:10px; padding:.4rem .6rem; margin:.3rem 0 .45rem; color:#713f12; }
 .pick.ok { background:#f0fdf4; border-color:#bbf7d0; color:#14532d; }
 .flow { display:flex; align-items:stretch; gap:.5rem; margin:.4rem 0 .6rem; flex-wrap:wrap; }
 .flow > i { align-self:center; color:#94a3b8; font-style:normal; }
+@media (max-width: 640px) { .flow > i { display:none; } .flow .fl { flex:1 1 100%; } }
 .flow .fl { flex:1 1 180px; border:1px solid var(--line); border-radius:12px; padding:.45rem .75rem; background:#fff; display:flex; flex-direction:column; }
 .flow .fl b { font-size:.84rem; color:#0f172a; } .flow .fl span { font-size:.74rem; color:var(--muted); }
 .flow .fl.done { background:#f0fdf4; border-color:#bbf7d0; } .flow .fl.done b { color:#15803d; }
@@ -187,9 +191,10 @@ div[data-testid="stDataFrame"] { border-radius:14px; overflow:hidden; }
 .tl i { display:block; height:100%; }
 .tll { display:flex; gap:2px; margin-top:5px; } .tll span { font-size:.68rem; color:var(--muted); text-align:center; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 .tll span.on { color:var(--ink); font-weight:800; }
+@media (max-width: 1180px) { .tll span { font-size:.6rem; letter-spacing:-.01em; } }
 .tlm { position:absolute; top:-26px; transform:translateX(-50%); text-align:center; }
 .tlm b { display:inline-block; background:var(--ink); color:#fff; font-size:.7rem; font-weight:700; padding:2px 8px; border-radius:999px; white-space:nowrap; }
-.tlm i { display:block; width:2px; height:26px; background:var(--ink); margin:2px auto 0; }
+.tlm i { display:block; width:2px; height:16px; background:var(--ink); margin:1px auto 0; }   /* ends at the bar, never over the labels */
 .wbox { background:#f8fafc; border-radius:16px; padding:12px 14px; }
 .wbox .lab { color:var(--muted); font-size:.78rem; font-weight:600; } .wbox .val { font-size:1.7rem; font-weight:800; letter-spacing:-.03em; margin:.15rem 0; }
 .wbox .val small { font-size:.85rem; color:var(--muted); font-weight:700; letter-spacing:0; } .wbox .sub { color:var(--muted); font-size:.76rem; }
@@ -232,6 +237,20 @@ div[data-testid="stVerticalBlockBorderWrapper"] { transition:box-shadow .2s ease
 .st-key-kpirow [data-testid="stLayoutWrapper"] > [data-testid="stVerticalBlock"] { height:100%; min-height:0; }
 .st-key-kpirow .kpi { min-height:0; }
 .st-key-kpirow [data-testid="stColumn"] [data-testid="stColumn"] button { padding:.3rem .5rem !important; min-width:0; white-space:nowrap; font-size:.8rem; }
+/* LAYOUT SAFETY — Streamlit pulls every markdown block up by -1rem to cancel a trailing paragraph margin; the app's own
+   HTML blocks (cards, notes, strips) end in a div, so that pull made the next element slide 16 px into them. */
+[data-testid="stMarkdownContainer"]:not(:has(> p:last-child, > ul:last-child, > ol:last-child, > blockquote:last-child)) { margin-bottom:0 !important; }
+/* slider value bubble sits above the track — give the label room so they never touch */
+[data-testid="stSlider"] > label, [data-testid="stSlider"] [data-testid="stWidgetLabel"] { margin-bottom:.9rem !important; }
+[data-testid="stSliderTickBar"] { margin-top:.15rem; }
+/* tabs: wrap onto a second row on narrow screens instead of hiding names behind scroll arrows */
+.stTabs div[role="tablist"], .stTabs [data-baseweb="tab-list"] { flex-wrap:wrap !important; overflow:visible !important; row-gap:4px; border-radius:18px !important; }
+.stTabs button[aria-label^="Scroll tabs"], [data-testid="stTabs"] button[aria-label^="Scroll"] { display:none !important; }
+@media (max-width: 1100px) { .stTabs div[role="tablist"] > div[data-testid="stTab"], .stTabs button[role="tab"] { flex:1 1 30% !important; padding:6px 10px !important; } }
+@media (max-width: 640px)  { .stTabs div[role="tablist"] > div[data-testid="stTab"], .stTabs button[role="tab"] { flex:1 1 45% !important; } }
+/* number inputs in narrow columns (lat / lon) never spill over */
+[data-testid="stNumberInput"], [data-testid="stNumberInput"] > div { min-width:0 !important; }
+[data-testid="stNumberInput"] input { min-width:0; }
 /* compact top cards: readable at a glance, not the main event */
 .st-key-kpirow .kpi .val { font-size:1.45rem; margin:.1rem 0 .1rem; }
 .st-key-kpirow .kpi .val small { font-size:.8rem; }
@@ -785,9 +804,13 @@ def label_marker(m, lat, lon, text, bg="#ffffff", fg="#0f172a"):
                                                      f'box-shadow:0 1px 3px rgba(0,0,0,.45)">{text}</div>', icon_size=(0, 0))).add_to(m)
 
 
-def pill_marker(m, lat, lon, text, color, anchor=(18, 10)):
-    folium.Marker([lat, lon], icon=folium.DivIcon(html=f'<div style="background:{color};color:#fff;font:700 11px Inter,sans-serif;padding:3px 9px;'
-                                                     f'border-radius:999px;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,.3)">{text}</div>', icon_anchor=anchor)).add_to(m)
+def pill_marker(m, lat, lon, text, color, anchor=None, above=False):
+    """One readable pill centred on the point (above it when `above`): the whole label sits on its own background,
+    so it never spills white text over the map (the old fixed-size icon cut the pill after a few letters)."""
+    ty = "-140%" if above or (anchor is not None and anchor[1] >= 20) else "-50%"
+    folium.Marker([lat, lon], icon=folium.DivIcon(icon_size=(0, 0), html=(
+        f'<div style="transform:translate(-50%,{ty});display:inline-block;background:{color};color:#fff;font:700 11px Inter,sans-serif;'
+        f'padding:3px 9px;border-radius:999px;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,.35);border:1.5px solid rgba(255,255,255,.85)">{text}</div>'))).add_to(m)
 
 
 
@@ -1300,7 +1323,7 @@ VI_TAG = f"★ {VI}" if VI_CHOICE in (G.BEST, G.CONSENSUS) else VI
 USE_CONS = VI_CHOICE == G.CONSENSUS
 
 
-def best_note(choice, vi, when_txt):
+def best_note(choice, vi, when_txt, key="bn"):
     """One line under an index selector: which index ★ Best picked and why (crop-specific research)."""
     crop_ = R["crop"]
     if choice == G.BEST:
@@ -1308,10 +1331,13 @@ def best_note(choice, vi, when_txt):
         _how = ("heat units since planting" if CLOCK.heat else "days since planting")
         _stg = (f' Stage: <b>{RANK_STAGE.label}</b> (stage day {_sd:.0f} by {_how}) — the ★ index follows the stage, so it changes with '
                 f'the planting date and the date checked.' if RANK_STAGE is not None and _sd is not None else "")
-        return (f'<div class="note" style="margin:.1rem 0 .5rem">★ Best for {crop_} {when_txt}: <b>{vi}</b> — {G.VI_HELP.get(vi, "")}.{_stg} '
-                f'<br><span style="color:#64748b">Why: {G.CROP_EVIDENCE.get(crop_, "")}</span></div>')
-    return (f'<div class="note" style="margin:.1rem 0 .5rem"><b>{vi}</b> — {G.VI_HELP.get(vi, "")}. '
-            f'Choose ★ Best for the index research ties most closely to {crop_} yield.</div>')
+        html(f'<div class="note" style="margin:.1rem 0 .3rem">★ Best for {crop_} {when_txt}: <b>{vi}</b> — {G.VI_HELP.get(vi, "")}.</div>')
+        with popover("ⓘ Why this index"):
+            st.markdown((_stg.strip() + "\n\n" if _stg else "") + "**Research:** " + G.CROP_EVIDENCE.get(crop_, ""), unsafe_allow_html=True)
+        return ""
+    html(f'<div class="note" style="margin:.1rem 0 .5rem"><b>{vi}</b> — {G.VI_HELP.get(vi, "")}. '
+         f'Choose ★ Best for the index research ties most closely to {crop_} yield.</div>')
+    return ""
 
 
 # ranking — EVERY comparable field, each on its clear image nearest the check image, compared through SI
@@ -1423,7 +1449,7 @@ def rank_status_html():
     if IMG_DATE is not None:
         gap_ = (CHECK_DATE - IMG_DATE).days
         when_ = "same day" if not gap_ else f"{gap_} d before"
-        return f'<div class="rankst">📅 <b>{CHECK_DATE:%b %d, %Y}</b> → my image <b>{IMG_DATE:%b %d}</b></div>'
+        return (f'<div class="rankst">📅 <b class="nw">{CHECK_DATE:%b %d, %Y}</b> → <span class="nw">my image <b>{IMG_DATE:%b %d}</b></span></div>')
     if now_have is not None:
         return (f'<div class="rankst warn">No clear image of my field {CHECK_DATE - dt.timedelta(days=int(max_days)):%b %d} → '
                 f'{CHECK_DATE:%b %d, %Y} (clouds). Pick a later date, or a longer look-back under Advanced.</div>')
@@ -1463,10 +1489,10 @@ with k2, card():
     if observed:
         sat_ = PINFO.get("my_sat_planting")
         html(f'<div class="kpi"><div class="lab">My green-up</div><div class="val">{anchor.strftime("%b %d")}</div>'
-             f'<div class="sub">{lag:+d} d after planting'
+             f'<div class="sub"><span class="nw">{lag:+d} d after planting</span>'
              + {"confirmed": ' · <b style="color:#15803d">confirms my date ✓</b>', "partly": ' · partly confirms my date',
                 "farmer": ' · <b style="color:#15803d">date confirmed by you ✓</b>'}.get(PINFO.get("cal_state"), "")
-             + (f'<br>satellite: planted ≈ <b>{sat_:%b %d}</b> ± {PINFO.get("my_sat_unc", 0):.0f} d' if sat_ else "") + '</div>'
+             + (f'<br>satellite: <span class="nw">planted ≈ <b>{sat_:%b %d}</b> ± {PINFO.get("my_sat_unc", 0):.0f} d</span>' if sat_ else "") + '</div>'
              f'<div class="sub" style="margin-top:.3rem"><span class="pill {"g" if pc_ == "high" else "a"}">{"Well dated" if pc_ == "high" else "Roughly dated"}</span>'
              + (f' &nbsp;NDVI {pd.Timestamp(T.loc[is_me, "onset_ndvi"].iloc[0]):%b %d} · EVI2 {pd.Timestamp(T.loc[is_me, "onset_evi2"].iloc[0]):%b %d}'
                 if {"onset_ndvi", "onset_evi2"} <= set(T) and T.loc[is_me, ["onset_ndvi", "onset_evi2"]].notna().all(axis=1).iloc[0] else "")
@@ -1615,7 +1641,8 @@ elif not observed:
 # ============================================================================ should I scout? (always visible)
 
 
-def stage_timeline(crop, dap):
+def stage_timeline(crop, dap, cal=None):
+    """Stage bar; the marker sits at the (heat-adjusted) stage day and is labelled with the calendar day after planting."""
     segs = G.stages(crop)
     span = [(s_, (min(s_.end, s_.start + 25) if s_.key == "post" else s_.end) - s_.start) for s_ in segs]
     tot = sum(w_ for _, w_ in span)
@@ -1631,7 +1658,9 @@ def stage_timeline(crop, dap):
             if dap < s_.start + w_ or s_.key == "post":
                 x_ += min(max(dap - s_.start, 0), w_); break
             x_ += w_
-        mk = f'<div class="tlm" style="left:{min(x_ / tot * 100, 99):.1f}%"><b>day {dap}</b><i></i></div>'
+        _t = f"day {int(cal)}" if cal is not None else f"day {dap:.0f}"
+        _tip = (f' title="day {int(cal)} after planting · stage day {dap:.0f} by heat units"' if cal is not None and abs(cal - dap) >= 3 else "")
+        mk = f'<div class="tlm"{_tip} style="left:{min(x_ / tot * 100, 99):.1f}%"><b>{_t}</b><i></i></div>'
     return f'<div class="tlw">{mk}<div class="tl">{bar}</div><div class="tll">{lab}</div></div>'
 
 
@@ -1722,11 +1751,11 @@ html('<div class="flow">'
      '<div class="fl done"><b>✓ Comparable fields</b><span>1 Filtering · 2 Green-up</span></div><i>→</i>'
      + (f'<div class="fl done"><b>✓ Ranked · {IMG_DATE:%b %d}</b><span>3 Map & ranking · 4 Scout answer</span></div>' if _ranked_ok else
         '<div class="fl next"><b>📅 Rank my field</b><span>unlocks 3 Map & ranking · 4 Scout answer</span></div>') + '<i>→</i>'
-     + ('<div class="fl done"><b>✓ Season</b><span>5 Trend vs reference · 6 Season summary</span></div>' if _season_ok else
-        '<div class="fl' + (' next' if _ranked_ok else '') + '"><b>Season</b><span>5 Trend vs reference · 6 Season summary</span></div>')
+     + ('<div class="fl done"><b>✓ Season</b><span>5 Trend · 6 Season</span></div>' if _season_ok else
+        '<div class="fl' + (' next' if _ranked_ok else '') + '"><b>Season</b><span>5 Trend · 6 Season</span></div>')
      + '</div>')
 tab_f, tab_g, tab_m, tab_o, tab_ts, tab_s, tab_d = st.tabs(
-    ["1 · Filtering", "2 · Green-up", "3 · Map & ranking", "4 · Scout answer", "5 · Trend vs reference", "6 · Season summary", "Data"])
+    ["1 · Filtering", "2 · Green-up", "3 · Map & ranking", "4 · Scout answer", "5 · Trend", "6 · Season", "Data"])
 _goto = ss.pop("goto_tab", None)
 if _goto is not None:                    # after ranking, open "Map & ranking" by itself
     import streamlit.components.v1 as _components
@@ -1756,7 +1785,7 @@ with tab_o, card():
                  'Start with <b>Rank my field</b> in the <i>My rank</i> card above.</div></div>')
         with d2:
             if st_today and st_today.key != "pre":
-                html(f'<div class="ctitle" style="margin-top:.2rem">Season stage on {CHECK_DATE:%b %d}</div>{stage_timeline(R["crop"], DAP(CHECK_DATE))}')
+                html(f'<div class="ctitle" style="margin-top:.2rem">Season stage on {CHECK_DATE:%b %d}</div>{stage_timeline(R["crop"], DAP(CHECK_DATE), (CHECK_DATE - my_plant).days)}')
     else:
         bgc, bdc, fgc = TONE[AD["level"]]
         conf_pill = ({"high": ("g", "High confidence"), "medium": ("a", "Medium confidence"), "low": ("r", "Low confidence")}.get(AD["conf"]) if AD.get("conf") else None)
@@ -1777,7 +1806,7 @@ with tab_o, card():
                      + why_rows((i + 1, w_) for i, w_ in enumerate(AD["why"]))
                      + (f'<div class="note" style="margin-top:.2rem">How sure: {" · ".join(AD.get("conf_why", []))}.</div>' if AD.get("conf_why") else ""))
             elif stg:
-                html(f'<div class="ctitle" style="margin-top:.2rem">Season stage</div>{stage_timeline(R["crop"], DAP(NOW_ASOF))}')
+                html(f'<div class="ctitle" style="margin-top:.2rem">Season stage</div>{stage_timeline(R["crop"], DAP(NOW_ASOF), (NOW_ASOF - my_plant).days)}')
         if NS and NS.get("ok"):
             v1, vR = st.columns([1.5, 1])
             with v1:
@@ -1796,7 +1825,7 @@ with tab_o, card():
                         f"It is taken over all comparable fields, so only about {100 - q * 100:.0f} % of them can score above 100 %.\n"
                         f"- Colours: green ≥ 95 % · light green 85–95 % · orange 70–85 % · red under 70 %.")
             with vR:
-                html(f'<div class="ctitle" style="margin-top:.6rem">Season stage</div>{stage_timeline(R["crop"], NS["dap"])}'
+                html(f'<div class="ctitle" style="margin-top:.6rem">Season stage</div>{stage_timeline(R["crop"], NS["dap"], (NS["date"] - my_plant).days)}'
                      '<div class="note" style="margin-top:1rem">Below: the trend of the last weeks, the ★ yield-critical stage so far, '
                      'and how the answer is decided.</div>')
 # ============================================================================ sub-tabs (Overview / Details first)
@@ -1932,16 +1961,16 @@ with tab_f:
         order = [lab for k, lab, _ in CATS if lab in set(dd["category"])]
         dd["order"] = dd["category"].map({lab: i for i, lab in enumerate(order)})
         pick_cat = alt.selection_point(name="pick_cat", fields=["category"], on="click", clear="dblclick")
-        arc = alt.Chart(dd).mark_arc(innerRadius=105, outerRadius=165, cornerRadius=6, padAngle=0.018, cursor="pointer").encode(
+        arc = alt.Chart(dd).mark_arc(innerRadius=78, outerRadius=124, cornerRadius=6, padAngle=0.018, cursor="pointer").encode(
             theta=alt.Theta("n:Q", stack=True), order=alt.Order("order:Q"),
             color=alt.Color("category:N", scale=alt.Scale(domain=order, range=[CAT_COLOR[k] for k, lab, _ in CATS if lab in order]),
                             legend=alt.Legend(title=None, orient="bottom", columns=2, labelFontSize=12, symbolType="circle", symbolSize=140)),
             opacity=alt.condition(pick_cat, alt.value(1), alt.value(0.3)),
             tooltip=[alt.Tooltip("category:N", title=""), alt.Tooltip("n:Q", title="fields"), alt.Tooltip("pct:Q", title="share", format=".0%")]).add_params(pick_cat)
         ctr = alt.Chart(pd.DataFrame({"t": [str(n_final)], "s": ["comparable fields"], "u": [f"of {n_all}"]}))
-        donut = (arc + ctr.mark_text(fontSize=44, fontWeight=800, dy=-12, color=INK).encode(text="t:N")
+        donut = (arc + ctr.mark_text(fontSize=36, fontWeight=800, dy=-10, color=INK).encode(text="t:N")
                  + ctr.mark_text(fontSize=13, dy=20, color="#64748b").encode(text="s:N")
-                 + ctr.mark_text(fontSize=12, dy=38, color="#94a3b8").encode(text="u:N")).properties(height=480).configure_view(strokeWidth=0)
+                 + ctr.mark_text(fontSize=12, dy=36, color="#94a3b8").encode(text="u:N")).properties(height=340).configure_view(strokeWidth=0)
         sel_cat = None
         try:
             ev = st.altair_chart(donut, use_container_width=True, on_select="rerun", selection_mode="pick_cat", key="donut")
@@ -2115,7 +2144,7 @@ with tab_m:
                      f'turned into percentiles and averaged with weights for {R["crop"]} at {RANK_STAGE.label if RANK_STAGE else "this stage"}: {wtxt}. '
                      f'The scout answer still reads “% of the best” on ★ {VI}; the consensus checks it.</div>')
             else:
-                html(best_note(VI_CHOICE, VI, f"on {RANK_DATE:%b %d}" + (f" ({RANK_STAGE.label})" if RANK_STAGE else "")))
+                best_note(VI_CHOICE, VI, f"on {RANK_DATE:%b %d}" + (f" ({RANK_STAGE.label})" if RANK_STAGE else ""))
             if USE_CONS and "cons_score" in coh_ and coh_["cons_score"].notna().any():
                 consensus_bar_chart(coh_, "rank_bars")
             elif len(coh_):
@@ -2171,7 +2200,7 @@ with tab_ts, card():
         with h3:
             if season_dialog and st.button("📅 Range", key="season_change_ts", use_container_width=True):
                 season_dialog()
-        html(best_note(vi_ts_choice, vi_ts, f"over the season (yield-critical stage: {G.critical(R['crop']).label})"))
+        best_note(vi_ts_choice, vi_ts, f"over the season (yield-critical stage: {G.critical(R['crop']).label})")
         min_n = 5 if len(comp_ids) >= 10 else 3
         ts = ts_vs_reference(S_season, comp_ids, ref_ids, "MY_FIELD", vi_ts, q, min_n=min_n)
         if len(comp_ids) < 8:
@@ -2238,7 +2267,7 @@ with tab_s:
         with c4_:
             if season_dialog and st.button("📅 Range", key="season_change_s", use_container_width=True):
                 season_dialog()
-        html(best_note(vi_s_choice, vi_s, f"over the season (yield-critical stage: {G.critical(R['crop']).label})"))
+        best_note(vi_s_choice, vi_s, f"over the season (yield-critical stage: {G.critical(R['crop']).label})")
         stat = {"Season median": "median", "Season peak": "peak"}.get(stat_lbl, "window")
         cw_s = G.critical(R["crop"])
         comp_s = (G.window_composite(S_season, PLANTING, R["crop"], vi_s, "mean", min_obs=2) if stat == "window"
@@ -2354,7 +2383,7 @@ with tab_g, card():
                                    help="Fields that are not comparable under the current filters, drawn faint behind.")
             xenc = alt.X("date:T", title=None, axis=alt.Axis(format="%b %d"))
             yenc = alt.Y("ndvi:Q", title=gi_, scale=alt.Scale(domain=[0, 1]))
-            cenc = alt.Color("group:N", scale=sc_, legend=alt.Legend(title=None, orient="top", symbolOpacity=1))
+            cenc = alt.Color("group:N", scale=sc_, legend=None)          # legend drawn in HTML below (wraps on phones)
             oth_ = gp[gp["group"] == "other fields"]
             cmp_ = gp[gp["group"] == "comparable"]
             ln = alt.layer(*([alt.Chart(oth_).mark_line(opacity=0.25, strokeWidth=0.8).encode(x=xenc, y=yenc, detail="field_id:N", color=cenc)]
@@ -2373,11 +2402,11 @@ with tab_g, card():
                         shape=alt.Shape("sensor:N", scale=alt.Scale(domain=[k_ for k_ in ["HLS Sentinel-2", "HLS Landsat", "Sentinel-2 10 m", "Landsat"] if k_ in set(my_["sensor"])],
                                                                     range=[v_ for k_, v_ in zip(["HLS Sentinel-2", "HLS Landsat", "Sentinel-2 10 m", "Landsat"],
                                                                                                 ["circle", "diamond", "square", "triangle-up"]) if k_ in set(my_["sensor"])]),
-                                        legend=alt.Legend(title=None, orient="top")),
+                                        legend=None),
                         fill=alt.condition(alt.datum.sensor == "HLS Landsat", alt.value("#ffffff"), alt.value(BLUE)),
                         tooltip=[alt.Tooltip("date:T", format="%b %d"), alt.Tooltip("ndvi:Q", format=".3f", title=gi_), alt.Tooltip("sensor:N")]))
             rules = alt.Chart(pd.DataFrame({"x": [pd.Timestamp(R["planting"]), anchor], "l": ["planting", "my green-up"]})).mark_rule(strokeDash=[5, 4], strokeWidth=2).encode(
-                x="x:T", color=alt.Color("l:N", scale=alt.Scale(domain=["planting", "my green-up"], range=[INK, BLUE]), legend=alt.Legend(title=None, orient="top")))
+                x="x:T", color=alt.Color("l:N", scale=alt.Scale(domain=["planting", "my green-up"], range=[INK, BLUE]), legend=None))
             layers = band + ln + mine + rules
             if ranked_line:
                 rk_ = pd.DataFrame({"x": [pd.Timestamp(IMG_DATE)], "y": [0.98],
@@ -2385,6 +2414,16 @@ with tab_g, card():
                 layers = (layers + alt.Chart(rk_).mark_rule(color="#ea580c", strokeWidth=3).encode(x="x:T")
                           + alt.Chart(rk_).mark_text(align="right", dx=-6, dy=4, fontSize=11, fontWeight="bold", color="#ea580c").encode(x="x:T", y="y:Q", text="t:N"))
             st.altair_chart(layers.resolve_scale(color="independent").properties(height=360).configure_view(strokeWidth=0), use_container_width=True)
+            _sens = [k_ for k_ in ["HLS Sentinel-2", "HLS Landsat", "Sentinel-2 10 m", "Landsat"] if k_ in set(my_["sensor"])]
+            _shape = {"HLS Sentinel-2": "●", "HLS Landsat": "◇", "Sentinel-2 10 m": "■", "Landsat": "▲"}
+            html('<div class="legend">'
+                 f'<span><i class="ln" style="background:{BLUE}"></i>my field</span>'
+                 '<span><i class="ln" style="background:#16a34a"></i>comparable</span>'
+                 '<span><i class="ln dash" style="border-color:#14532d"></i>their median</span>'
+                 + ('<span><i class="ln" style="background:#cbd5e1"></i>other fields</span>' if show_other else "")
+                 + f'<span><i class="ln dash" style="border-color:{INK}"></i>planting entered</span>'
+                 f'<span><i class="ln dash" style="border-color:{BLUE}"></i>my green-up</span>'
+                 + "".join(f'<span><b style="color:{BLUE}">{_shape[k_]}</b> {k_}</span>' for k_ in _sens) + '</div>')
         with rcol:
             html(f'<div class="ctitle">When neighbours were planted (estimated)</div><div class="csub">blue line = my planting date · shaded = ± {window} days · '
                  'each field worked back from its green-up</div>')
