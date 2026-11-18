@@ -201,6 +201,15 @@ div[data-testid="stVerticalBlockBorderWrapper"] { transition:box-shadow .2s ease
 .stTabs div[role="tablist"], .stTabs [data-baseweb="tab-list"] { width:100% !important; max-width:100%; overflow-x:auto; scrollbar-width:none; display:flex; }
 .stTabs div[role="tablist"] > div[data-testid="stTab"], .stTabs button[role="tab"] { flex:1 1 0; justify-content:center; white-space:nowrap; }
 .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] { display:none !important; }
+/* the selected-tab mark: a short, rounded bar centred under the label instead of a full-width line */
+.stTabs .react-aria-SelectionIndicator { left:50% !important; right:auto !important; width:28px !important; height:3px !important;
+  transform:translateX(-50%) !important; bottom:3px !important; border-radius:3px; background:#16a34a !important; }
+/* floating progress card, bottom-right: work in progress never pushes the page around */
+.st-key-progress_dock { position:fixed; right:22px; bottom:22px; width:min(400px, calc(100vw - 32px)); z-index:999990; }
+.st-key-progress_dock:empty, .st-key-progress_dock > div:empty { display:none; }
+.st-key-progress_dock [data-testid="stExpander"], .st-key-progress_dock details { background:#ffffff; border:1px solid var(--line);
+  border-radius:16px !important; box-shadow:0 18px 40px rgba(15,23,42,.18), 0 2px 6px rgba(15,23,42,.08); }
+.st-key-progress_dock [data-testid="stExpanderDetails"] { max-height:42vh; overflow:auto; font-size:.84rem; }
 /* cards side by side: the same height, so rows line up (Filtering, Green-up, Map & ranking, Overview) */
 [data-testid="stMain"] [data-testid="stHorizontalBlock"] { align-items:stretch; }
 [data-testid="stMain"] [data-testid="stColumn"] > [data-testid="stVerticalBlock"] { height:100%; }
@@ -220,10 +229,22 @@ div[data-testid="stVerticalBlockBorderWrapper"] { transition:box-shadow .2s ease
 .st-key-kpirow [data-testid="stColumn"] { display:flex; flex-direction:column; }
 .st-key-kpirow [data-testid="stColumn"] > [data-testid="stVerticalBlock"] { flex:1 1 auto; height:100%; }
 .st-key-kpirow [data-testid="stColumn"] > [data-testid="stVerticalBlock"] > [data-testid="stLayoutWrapper"] { flex:1 1 auto; height:100%; }
-.st-key-kpirow [data-testid="stLayoutWrapper"] > [data-testid="stVerticalBlock"] { height:100%; min-height:300px; }
+.st-key-kpirow [data-testid="stLayoutWrapper"] > [data-testid="stVerticalBlock"] { height:100%; min-height:0; }
 .st-key-kpirow .kpi { min-height:0; }
 .st-key-kpirow [data-testid="stColumn"] [data-testid="stColumn"] button { padding:.3rem .5rem !important; min-width:0; white-space:nowrap; font-size:.8rem; }
-.st-key-kpirow .kpi .val { font-size:2rem; }
+/* compact top cards: readable at a glance, not the main event */
+.st-key-kpirow .kpi .val { font-size:1.45rem; margin:.1rem 0 .1rem; }
+.st-key-kpirow .kpi .val small { font-size:.8rem; }
+.st-key-kpirow .kpi .lab { font-size:.74rem; }
+.st-key-kpirow .kpi .sub { font-size:.74rem; line-height:1.35; }
+.st-key-kpirow .kpi .pill { font-size:.68rem; padding:2px 8px; }
+.st-key-kpirow .hero { padding:10px 14px; border-radius:14px; }
+.st-key-kpirow .hero .bar { height:6px; margin:.35rem 0 .3rem; }
+.st-key-kpirow .rankst { font-size:.72rem; padding:.3rem .5rem; margin-top:.3rem; }
+.st-key-kpirow [data-testid="stVerticalBlockBorderWrapper"] { border-radius:16px !important; }
+.st-key-kpirow [data-testid="stVerticalBlockBorderWrapper"] > div { padding:12px 14px !important; }
+.st-key-kpirow button { min-height:32px !important; padding:.2rem .6rem !important; font-size:.78rem !important; }
+.st-key-kpirow [data-testid="stVerticalBlock"] { gap:.45rem !important; }
 .rankst.warn { color:#92400e; }
 @media (max-width: 1100px) { .kpi .val { font-size:1.8rem; } .n-big { font-size:2.1rem; } .hd h1 { font-size:1.6rem; } }
 @media (max-width: 760px) {
@@ -659,7 +680,7 @@ html(f'<div class="hd"><div><h1>Field ranking</h1><div class="sub">How well is m
 if ss.get("example"):
     html(f'<div class="callout info"><b>Example:</b> {ss.example}. Press <b>Rank my field</b> for the rank and the scout answer — everything is live: switch filters, change the date, explore. '
          f'To check your own field, press <b>↺ Start over</b> in the sidebar.</div>')
-progress_slot = st.container()
+progress_slot = st.container(key="progress_dock")      # floats bottom-right (CSS)
 if ss.pop("stopped", False):
     st.toast("Stopped. Everything already read is kept — running again picks up where it stopped.", icon="⏹️")
     html('<div class="callout warn"><b>Stopped.</b> Nothing was lost: images, green-up and profiles read so far are cached, so pressing '
@@ -1060,6 +1081,12 @@ for c_ in ("elev_median", "texture", "texture_group", "irr_source", "om", "drain
         T[c_] = np.nan
 me = T[is_me].iloc[0]
 PINFO = R.get("pinfo", {})
+CLOCK = G.SeasonClock(R["crop"], R["planting"], R.get("wx"))   # corn & cotton: growth stage from heat units since planting
+
+
+def DAP(d) -> float:
+    """'Stage days' after my planting on date d — heat-adjusted for corn and cotton, calendar days otherwise."""
+    return CLOCK(d)
 if "plant_conf" not in T:            # results made before planting-date estimation existed
     T["plant_conf"] = np.where(T["greenup_status"].eq("crossing"), "high", None); T["plant_why"] = ""; T["plant_unc"] = np.nan
     T["plant_lo"] = T["plant_hi"] = T["est_planting"]
@@ -1099,7 +1126,17 @@ lag = (anchor.date() - R["planting"]).days
 n_hi_all = int((nb["plant_conf"] == "high").sum()); n_lo_all = int((nb["plant_conf"] == "low").sum())
 
 observed = bool(info.get("anchor_observed", "not visible" not in str(info.get("anchor_source", ""))))
-DEFAULT_RANK_DATE = min(dt.date.today(), R["planting"] + dt.timedelta(days=75))
+def _first_date_at(stage_day: float) -> dt.date:
+    """First calendar date my field reaches `stage_day` (heat-adjusted for corn and cotton)."""
+    for k_ in range(0, 220):
+        d_ = R["planting"] + dt.timedelta(days=k_)
+        if DAP(d_) >= stage_day:
+            return d_
+    return R["planting"] + dt.timedelta(days=int(stage_day))
+
+
+_cw = G.critical(R["crop"])
+DEFAULT_RANK_DATE = min(dt.date.today(), _first_date_at(_cw.start + 0.4 * (_cw.end - _cw.start)))   # well inside the yield-critical stage
 
 
 IMG_COLS = ["field_id", "date", "scene_id", "n_pix"] + [c for k in C.VI_ENGINE for c in (k, f"{k}_p10", f"{k}_p90")]
@@ -1126,11 +1163,13 @@ def _rank_form():
                 "the rank, the scout answer, the map and the ranking all follow it.")
     d = st.date_input("Check date", value=pd.Timestamp(ss["check_date"]).date() if ss.get("check_date") else min(DEFAULT_RANK_DATE, dt.date.today()),
                       key="dlg_date", max_value=dt.date.today(), help="The newest clear image on or before this date is used.")
-    dap_ = (d - R["planting"]).days
+    dap_ = DAP(d)
     st_d = G.stage_at(R["crop"], dap_)
     cur_ = ss.get("vi_seg") or G.BEST
     vi_ = G.resolve_vi(cur_, R["crop"], dap_)
-    st.caption(f"Day {dap_} after planting" + (f" · {st_d.label}" if st_d else "") + f" · index **{'★ ' + vi_ if cur_ == G.BEST else vi_}**"
+    _cal = (d - R["planting"]).days
+    st.caption(f"Day {_cal} after planting" + (f" (≈ stage day {dap_:.0f} by heat units)" if CLOCK.heat and abs(dap_ - _cal) >= 3 else "")
+               + (f" · {st_d.label}" if st_d else "") + f" · index **{'★ ' + vi_ if cur_ == G.BEST else vi_}**"
                + (f" (★ Best for {R['crop']} at this stage)" if cur_ == G.BEST else "") + " — switch the index in *Map & ranking* any time, it re-ranks instantly.")
     if st.button("Rank & check my field", type="primary", use_container_width=True, key="dlg_go"):
         if d >= dt.date.today():
@@ -1210,7 +1249,7 @@ PLANTING = {fid: d for fid, d in zip(T["field_id"], pd.to_datetime(T["est_planti
 CHECK_DATE = pd.Timestamp(ss.get("check_date") or dt.date.today()).date()
 NOW_ASOF = CHECK_DATE
 my_plant = R["planting"]
-st_today = G.stage_at(R["crop"], (CHECK_DATE - my_plant).days)
+st_today = G.stage_at(R["crop"], DAP(CHECK_DATE))
 in_season = st_today is not None and st_today.key not in ("pre", "post")
 now_key = (str(CHECK_DATE), R["crop"], int(max_days))
 now_have = ss.now_cache.get(now_key)
@@ -1253,10 +1292,10 @@ if now_have is not None and len(now_have[0]):
 IMG_DATE, IMG_N = G.pick_image_date(S_now, comp_now, "MY_FIELD", CHECK_DATE, int(max_days), min_n) if S_now is not None else (None, 0)
 VI_CHOICE = ss.get("vi_seg") or G.BEST
 RANK_DATE = IMG_DATE or CHECK_DATE
-RANK_STAGE = G.stage_at(R["crop"], (RANK_DATE - R["planting"]).days)
+RANK_STAGE = G.stage_at(R["crop"], DAP(RANK_DATE))
 if VI_CHOICE not in [G.BEST, G.CONSENSUS] + list(G.ALL_VI):      # a value left over from an older version of the app
     VI_CHOICE = G.BEST; ss["vi_seg"] = G.BEST
-VI = G.resolve_vi(VI_CHOICE, R["crop"], (RANK_DATE - R["planting"]).days)
+VI = G.resolve_vi(VI_CHOICE, R["crop"], DAP(RANK_DATE))
 VI_TAG = f"★ {VI}" if VI_CHOICE in (G.BEST, G.CONSENSUS) else VI
 USE_CONS = VI_CHOICE == G.CONSENSUS
 
@@ -1265,7 +1304,11 @@ def best_note(choice, vi, when_txt):
     """One line under an index selector: which index ★ Best picked and why (crop-specific research)."""
     crop_ = R["crop"]
     if choice == G.BEST:
-        return (f'<div class="note" style="margin:.1rem 0 .5rem">★ Best for {crop_} {when_txt}: <b>{vi}</b> — {G.VI_HELP.get(vi, "")}. '
+        _sd = DAP(RANK_DATE) if "RANK_DATE" in globals() else None
+        _how = ("heat units since planting" if CLOCK.heat else "days since planting")
+        _stg = (f' Stage: <b>{RANK_STAGE.label}</b> (stage day {_sd:.0f} by {_how}) — the ★ index follows the stage, so it changes with '
+                f'the planting date and the date checked.' if RANK_STAGE is not None and _sd is not None else "")
+        return (f'<div class="note" style="margin:.1rem 0 .5rem">★ Best for {crop_} {when_txt}: <b>{vi}</b> — {G.VI_HELP.get(vi, "")}.{_stg} '
                 f'<br><span style="color:#64748b">Why: {G.CROP_EVIDENCE.get(crop_, "")}</span></div>')
     return (f'<div class="note" style="margin:.1rem 0 .5rem"><b>{vi}</b> — {G.VI_HELP.get(vi, "")}. '
             f'Choose ★ Best for the index research ties most closely to {crop_} yield.</div>')
@@ -1306,7 +1349,7 @@ if IMG_DATE is not None:
 # ◎ consensus: the same ranking on every index (same image, same calibration, same reference rule), combined by
 # stage-weighted percentile — a robustness check on the single ★ index. Memoised: re-ranking 8 indices is cheap but not free.
 CONS = MYC = AGREE = None
-W_NOW = G.vi_weights(R["crop"], (RANK_DATE - R["planting"]).days)
+W_NOW = G.vi_weights(R["crop"], DAP(RANK_DATE))
 if IMG_DATE is not None:
     ckey = (str(IMG_DATE), str(CHECK_DATE), q, RANK_WINDOW, hash(tuple(sorted(comp_now))), hash(tuple(sorted(ref_now))), id(now_have[0]))
     if ss.get("cons_key") != ckey:
@@ -1330,7 +1373,7 @@ if S_now is not None:
                    if IMG_DATE is not None else (None, None))                       # same method on every date
     NS = G.now_status(S_now, comp_now, ref_now, "MY_FIELD", R["crop"], my_plant, CHECK_DATE, q,
                       min_n=max(1, min(min_n, IMG_N)) if IMG_DATE else min_n, vi=VI, planting=PLANTING, at_date=IMG_DATE,
-                      ts_override=TSR)
+                      ts_override=TSR, dap_fn=DAP)
 elif now_have is not None:
     NS = {"ok": False, "why": "no clear images in the look-back window", "as_of": CHECK_DATE, "stage_today": st_today}
 if NS and NS.get("ok") and ranked is not None and pd.notna(mr["rank"]):
@@ -1386,8 +1429,7 @@ def rank_status_html():
                 f'{CHECK_DATE:%b %d, %Y} (clouds). Pick a later date, or a longer look-back under Advanced.</div>')
     if st_today is not None and st_today.key == "pre":
         return f'<div class="rankst warn">Not planted yet on {CHECK_DATE:%b %d, %Y} — pick a date after {my_plant:%b %d}.</div>'
-    return ('<div class="rankst">Comparable fields are ready. Pick a date — rank, scout answer, map and ranking all follow it, '
-            'and images are read only for that date.</div>')
+    return '<div class="rankst">Pick a date to rank — images are read only for that date.</div>'
 
 
 # ============================================================================ KPI row (always visible)
@@ -1639,7 +1681,7 @@ if AD is not None and AGREE and AD.get("level") in ("scout", "watch", "ok") and 
     # second opinion from all indices: agreement keeps the confidence, disagreement lowers it one step and says why
     down = {"high": "medium", "medium": "low", "low": "low"}
     nb_, n_ = AGREE["n_bottom_half"], AGREE["n"]
-    AD["why"] = list(AD["why"]) + [f"◎ Across all {n_} indices (weighted for this stage): <b>{int(MYC['cons_rank'])}{G._ord(int(MYC['cons_rank']))} of {N_CONS}</b> — "
+    AD["why"] = list(AD["why"]) + [f"◎ Across {n_} independent index families (weighted for this stage): <b>{int(MYC['cons_rank'])}{G._ord(int(MYC['cons_rank']))} of {N_CONS}</b> — "
                                   f"{nb_} of {n_} put my field in the bottom half"]
     if AD["level"] in ("scout", "watch") and AGREE["w_top_half"] >= 0.6:
         AD["conf"] = down[AD["conf"]]; AD["conf_why"] = list(AD.get("conf_why", [])) + [f"the indices disagree — most of the weight puts my field in the top half"]
@@ -1652,11 +1694,14 @@ if AD is not None and AGREE and AD.get("level") in ("scout", "watch", "ok") and 
 def index_strip():
     """My field's standing on every index (percentile among the ranked fields), heavier = more weight at this stage."""
     rows = [{"vi": v, "pct": float(MYC[f"pct_{v}"]), "rank": int(MYC[f"rank_{v}"]), "w": W_NOW.get(v, 1.0),
-             "why": G.VI_EVIDENCE.get(v, ""), "best": v == VI} for v in G.ALL_VI if f"pct_{v}" in MYC and pd.notna(MYC.get(f"pct_{v}"))]
+             "why": G.VI_EVIDENCE.get(v, ""), "best": v == VI, "fam": G.VI_FAMILY.get(v, v)}
+            for v in G.ALL_VI if f"pct_{v}" in MYC and pd.notna(MYC.get(f"pct_{v}")) and W_NOW.get(v, 1.0) > 0]
     if not rows:
         return
     d = pd.DataFrame(rows).sort_values(["w", "pct"], ascending=[False, False])
-    d["label"] = d["vi"] + np.where(d["best"], " ★", "") + "  (×" + d["w"].map(lambda x: f"{x:g}") + ")"
+    _sib = {v: [o for o in G.ALL_VI if o != v and G.VI_FAMILY.get(o) == G.VI_FAMILY.get(v)] for v in d["vi"]}
+    d["label"] = (d["vi"] + d["vi"].map(lambda v: f" ≡ {_sib[v][0]}" if _sib[v] else "") + np.where(d["best"], " ★", "")
+                  + "  (×" + d["w"].map(lambda x: f"{x:g}") + ")")
     order = list(d["label"])
     xs = alt.X("pct:Q", scale=alt.Scale(domain=[0, 100]), title="my field's percentile among the ranked fields (100 = best)",
                axis=alt.Axis(values=[0, 25, 50, 75, 100], grid=False, labelFontSize=10))
@@ -1711,7 +1756,7 @@ with tab_o, card():
                  'Start with <b>Rank my field</b> in the <i>My rank</i> card above.</div></div>')
         with d2:
             if st_today and st_today.key != "pre":
-                html(f'<div class="ctitle" style="margin-top:.2rem">Season stage on {CHECK_DATE:%b %d}</div>{stage_timeline(R["crop"], (CHECK_DATE - my_plant).days)}')
+                html(f'<div class="ctitle" style="margin-top:.2rem">Season stage on {CHECK_DATE:%b %d}</div>{stage_timeline(R["crop"], DAP(CHECK_DATE))}')
     else:
         bgc, bdc, fgc = TONE[AD["level"]]
         conf_pill = ({"high": ("g", "High confidence"), "medium": ("a", "Medium confidence"), "low": ("r", "Low confidence")}.get(AD["conf"]) if AD.get("conf") else None)
@@ -1732,7 +1777,7 @@ with tab_o, card():
                      + why_rows((i + 1, w_) for i, w_ in enumerate(AD["why"]))
                      + (f'<div class="note" style="margin-top:.2rem">How sure: {" · ".join(AD.get("conf_why", []))}.</div>' if AD.get("conf_why") else ""))
             elif stg:
-                html(f'<div class="ctitle" style="margin-top:.2rem">Season stage</div>{stage_timeline(R["crop"], (NOW_ASOF - my_plant).days)}')
+                html(f'<div class="ctitle" style="margin-top:.2rem">Season stage</div>{stage_timeline(R["crop"], DAP(NOW_ASOF))}')
         if NS and NS.get("ok"):
             v1, vR = st.columns([1.5, 1])
             with v1:
@@ -1800,7 +1845,7 @@ with tab_det:
                      'comparable fields. Stages are typical Georgia timings counted from planting — approximate.</div>')
             if MYC is not None and pd.notna(MYC["cons_score"]):
                 with card():
-                    html(f'<div class="ctitle">Second opinion · all {int(MYC["n_vi"])} indices on {IMG_DATE:%b %d}</div>'
+                    html(f'<div class="ctitle">Second opinion · {int(MYC["n_vi"])} independent index families on {IMG_DATE:%b %d}</div>'
                          f'<div class="csub">my field ranked on every index with the same image and the same comparable fields · bigger dot = more weight '
                          f'for {R["crop"]} at this stage ({RANK_STAGE.label if RANK_STAGE else "—"}) · blue = ★ {VI} · purple line = ◎ consensus score '
                          f'{MYC["cons_score"]:.0f} → <b>#{int(MYC["cons_rank"])} of {N_CONS}</b></div>')
@@ -2059,13 +2104,14 @@ with tab_m:
             if True:
                 if "vi_seg" in ss and ss["vi_seg"] not in [G.BEST, G.CONSENSUS] + list(G.ALL_VI):
                     ss["vi_seg"] = G.BEST
-                _bv = G.recommended_vi(R["crop"], (RANK_DATE - R["planting"]).days)
-                _lbl = {G.BEST: f"★ Best now ({_bv})", G.CONSENSUS: f"◎ Consensus of all {len(G.ALL_VI)}"}
+                _bv = G.recommended_vi(R["crop"], DAP(RANK_DATE))
+                _lbl = {G.BEST: f"★ Best now ({_bv})", G.CONSENSUS: f"◎ Consensus of {len(set(G.VI_FAMILY.values()))} band families"}
                 st.selectbox("Rank by", [G.BEST, G.CONSENSUS] + list(G.ALL_VI), key="vi_seg", label_visibility="collapsed",
                              format_func=lambda v: _lbl.get(v, v), **({} if "vi_seg" in ss else {"index": 0}))
             if USE_CONS:
                 wtxt = " · ".join(f"{v} ×{w:g}" for v, w in sorted(W_NOW.items(), key=lambda x: -x[1]))
-                html(f'<div class="note" style="margin:.1rem 0 .5rem">◎ <b>Consensus</b> — every field ranked on all {len(G.ALL_VI)} indices, '
+                html(f'<div class="note" style="margin:.1rem 0 .5rem">◎ <b>Consensus</b> — every field ranked on one index from each of the {len(set(G.VI_FAMILY.values()))} band families '
+                     f'(NDVI ≡ WDRVI, GNDVI ≡ GCVI and NDRE ≡ CIre rank fields identically, so each pair counts once), '
                      f'turned into percentiles and averaged with weights for {R["crop"]} at {RANK_STAGE.label if RANK_STAGE else "this stage"}: {wtxt}. '
                      f'The scout answer still reads “% of the best” on ★ {VI}; the consensus checks it.</div>')
             else:

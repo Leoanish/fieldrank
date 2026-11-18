@@ -87,9 +87,9 @@ STAGES: dict[str, list[Stage]] = {
               "Differences now are mostly stand and emergence.", "stand count, skips, crusting, early weed pressure"),
         Stage("vegetative", "Rapid growth (V7–VT)", 30, 58, "WDRVI",
               "Canopy is closing — fields separate on growth rate.", "nitrogen side-dress, weeds, water"),
-        Stage("critical", "Tassel → kernel set (VT–R2)", 58, 88, "CIre",
+        Stage("critical", "Tassel → milk (VT–R3)", 58, 88, "CIre",
               "Yield-critical: kernel number is set now — gaps here matter most for yield.", "water stress at silking, nitrogen, disease"),
-        Stage("late", "Grain fill → maturity (R3–R6)", 88, 125, "GCVI",
+        Stage("late", "Dough → maturity (R4–R6)", 88, 125, "GCVI",
               "Greenness falls as the crop dries down — a later hybrid or later planting looks greener without yielding more.",
               "early leaf loss from disease or drought"),
         Stage("post", "After the season", 125, 10_000, "NDVI",
@@ -108,14 +108,14 @@ STAGES: dict[str, list[Stage]] = {
               "Season is over — the yield-window result is the final read.", ""),
     ],
     "cotton": [
-        Stage("early", "Emergence → squaring", 0, 35, "NDVI",
+        Stage("early", "Emergence → pinhead square", 0, 35, "NDVI",
               "Differences now are mostly stand and early vigour.", "stand, thrips, seedling disease"),
         Stage("vegetative", "Squaring → first bloom", 35, 60, "WDRVI",
               "Canopy is closing — fields separate on growth rate.", "water, nitrogen, plant-growth-regulator timing"),
-        Stage("critical", "Flowering & boll fill", 60, 120, "CIre",
+        Stage("critical", "First bloom → first open boll", 60, 120, "NDRE",
               "Yield-critical: bolls are set and filled now (best signal ~75–120 days) — gaps here matter most for yield.",
               "water stress during bloom, nitrogen, stink bugs"),
-        Stage("late", "Boll opening → defoliation", 120, 160, "NDVI",
+        Stage("late", "Open bolls → defoliation", 120, 160, "NDVI",
               "Greenness drops with opening bolls and defoliant — not a problem by itself.", ""),
         Stage("post", "After the season", 160, 10_000, "NDVI",
               "Season is over — the yield-window result is the final read.", ""),
@@ -139,6 +139,65 @@ STAGES: dict[str, list[Stage]] = {
 
 def stages(crop: str) -> list[Stage]:
     return STAGES.get(crop, STAGES["cotton"])
+
+
+# ----------------------------------------------------------------------------- heat-unit growth stages
+# Corn and cotton develop on heat, not on the calendar: a late-planted field reaches bloom in fewer days. The stage
+# edges above are matched to research growing-degree-day edges (°C·days, the crop's base / 30 °C cap), and the days
+# after planting are converted to "stage days" through local weather. Soybean (day-length driven) and peanut keep days.
+#   corn  (°F GDD → °C·d, ÷1.8; Iowa State PMR 1009 / Ohio State AGF-0101): V6 ≈ 475 → 265 · VT ≈ 1370 → 760 ·
+#         R3 milk ≈ 1830 → 1020 · R6 black layer ≈ 2650 → 1470
+#   cotton (UGA C1244 DD-60s → °C·d): pinhead square 550 → 305 · first bloom 940 → 520 · first open boll 2150 → 1195 ·
+#         harvest ≈ 2700 → 1500
+STAGE_GDD = {
+    "corn":   [(0, 0.0), (30, 265.0), (58, 760.0), (88, 1020.0), (125, 1470.0)],
+    "cotton": [(0, 0.0), (35, 305.0), (60, 520.0), (120, 1195.0), (160, 1500.0)],
+}
+
+
+class SeasonClock:
+    """Days after planting → 'stage days' for the stage table. Uses heat units for corn and cotton when the local
+    weather is known (planting → date), else plain calendar days. Callable: clock(date) -> float."""
+
+    def __init__(self, crop: str, planting: dt.date, wx: pd.DataFrame | None = None):
+        self.crop, self.planting = crop, planting
+        self.days = self.cum = None
+        if crop in STAGE_GDD and wx is not None and len(wx):
+            try:
+                from .plantdate import _cum_gdd
+                self.days, self.cum = _cum_gdd(wx, crop)
+            except Exception:
+                self.days = self.cum = None
+        self.heat = self.cum is not None
+
+    def gdd(self, date) -> float | None:
+        """Heat units (°C·days) from planting to `date`; the last 14 days' rate carries on past the weather record."""
+        if not self.heat:
+            return None
+        d0 = np.datetime64(self.planting, "D"); d1 = np.datetime64(pd.Timestamp(date).date(), "D")
+        if d1 <= d0:
+            return 0.0
+        i0 = int((d0 - self.days[0]).astype(int)); i1 = int((d1 - self.days[0]).astype(int))
+        if i0 < 0 or i0 >= len(self.cum):
+            return None
+        base = self.cum[i0 - 1] if i0 > 0 else 0.0
+        last = len(self.cum) - 1
+        if i1 - 1 <= last:
+            return float(self.cum[i1 - 1] - base)
+        rate = float((self.cum[last] - self.cum[max(last - 14, 0)]) / max(min(14, last), 1))
+        return float(self.cum[last] - base + rate * (i1 - 1 - last))
+
+    def __call__(self, date) -> float:
+        cal = (pd.Timestamp(date).date() - self.planting).days
+        g = self.gdd(date) if self.heat and cal > 0 else None
+        if g is None:
+            return cal
+        edges = STAGE_GDD[self.crop]
+        dd, gg = np.array([e[0] for e in edges], float), np.array([e[1] for e in edges], float)
+        if g <= gg[-1]:
+            return float(np.interp(g, gg, dd))
+        slope = (dd[-1] - dd[-2]) / (gg[-1] - gg[-2])
+        return float(dd[-1] + (g - gg[-1]) * slope)
 
 
 def stage_at(crop: str, dap: int | float | None) -> Stage | None:
@@ -216,11 +275,13 @@ def pick_image_date(S: pd.DataFrame, comp_ids, my_id: str, as_of: dt.date, lookb
 
 def now_status(S: pd.DataFrame, comp_ids, ref_ids, my_id: str, crop: str, my_planting: dt.date, as_of: dt.date,
                q: float = C.VIRTUAL_REF_QUANTILE, min_n: int = 5, fresh_days: int = 10, vi: str | None = None,
-               planting: dict | None = None, at_date: dt.date | None = None, ts_override: pd.DataFrame | None = None) -> dict:
+               planting: dict | None = None, at_date: dt.date | None = None, ts_override: pd.DataFrame | None = None,
+               dap_fn=None) -> dict:
     """Newest same-day comparison of my field with the comparable fields, on or before `as_of`.
     vi=None → the index recommended for my stage on that date."""
     from .season import ts_vs_reference
-    out = {"ok": False, "as_of": as_of, "stage_today": stage_at(crop, (as_of - my_planting).days)}
+    _dap = dap_fn or (lambda d: (pd.Timestamp(d).date() - my_planting).days)     # heat-adjusted stage days when given
+    out = {"ok": False, "as_of": as_of, "stage_today": stage_at(crop, _dap(as_of))}
     if S is None or S.empty:
         out["why"] = "no clear images in the last weeks"
         return out
@@ -232,7 +293,7 @@ def now_status(S: pd.DataFrame, comp_ids, ref_ids, my_id: str, crop: str, my_pla
         return out
     # stage → index (decided on my newest clear look, so it matches the image being compared)
     d_last = mine["date"].max()
-    st_ = stage_at(crop, (d_last.date() - my_planting).days)
+    st_ = stage_at(crop, _dap(d_last.date()))
     vi = vi or st_.vi
     ts = ts_override if ts_override is not None else ts_vs_reference(S, comp_ids, ref_ids, my_id, vi, q, min_n=min_n)
     ts = ts.dropna(subset=["SI"]).sort_values("date")
@@ -244,7 +305,7 @@ def now_status(S: pd.DataFrame, comp_ids, ref_ids, my_id: str, crop: str, my_pla
     L = ts.iloc[-1]
     prev = ts[ts["date"] <= L["date"] - pd.Timedelta(days=5)]
     P = prev.iloc[-1] if len(prev) and (L["date"] - prev.iloc[-1]["date"]).days <= 24 else None
-    st_ = stage_at(crop, (L["date"].date() - my_planting).days)
+    st_ = stage_at(crop, _dap(L["date"].date()))
     word, tone = verdict(float(L["SI"]))
     dSI = float(L["SI"] - P["SI"]) if P is not None else np.nan
     trend = ("—" if np.isnan(dSI) else "closing the gap" if dSI > 0.03 else "falling behind" if dSI < -0.03 else "holding steady")
@@ -269,7 +330,7 @@ def now_status(S: pd.DataFrame, comp_ids, ref_ids, my_id: str, crop: str, my_pla
                SI=float(L["SI"]), rank=int(L["rank"]), n=int(L["n"]) + 1, me=float(L["me"]), ref=float(L["ref"]),
                prev_date=None if P is None else P["date"].date(), prev_SI=None if P is None else float(P["SI"]),
                prev_rank=None if P is None else int(P["rank"]), prev_n=None if P is None else int(P["n"]) + 1,
-               dSI=dSI, trend=trend, word=word, tone=tone, harvested=harvested, my_ndvi=my_ndvi, dap=(L["date"].date() - my_planting).days,
+               dSI=dSI, trend=trend, word=word, tone=tone, harvested=harvested, my_ndvi=my_ndvi, dap=_dap(L["date"].date()),
                ts=ts[["date", "SI", "rank", "n", "me", "ref", "p25", "p50", "p75"]].tail(10).reset_index(drop=True),
                day=day[["field_id", "value", "pct", "is_me"]].dropna(subset=["value"]).reset_index(drop=True),
                spread_me=spread_me, spread_comp=spread_comp, n_behind=n_behind, n_last=len(last3),
@@ -420,12 +481,15 @@ def _ord(n: int) -> str:
 # ----------------------------------------------------------------------------- crop-specific "best" index
 BEST = "★ Best"
 CROP_EVIDENCE = {
-    "corn": "Red-edge / chlorophyll indices (CIre, MTCI-type, GCVI) were the most consistent corn yield predictors around the reproductive stage "
+    "corn": "Tasseling → milk is the best time to read corn yield; NDRE and GNDVI were the strongest single-date predictors at milk stage "
+            "(UAV, Göttingen 2022) and red-edge for red beat NDVI against harvester maps (Brazil). "
+            "Red-edge / chlorophyll indices (CIre, MTCI-type, GCVI) were the most consistent corn yield predictors around the reproductive stage "
             "(Mississippi rainfed trials); swapping red for red-edge beat NDVI, which saturates in dense corn (Brazil, Sentinel-2 + harvester maps); "
             "GNDVI did best at grain fill in Italy; GCVI drives Stanford's SCYM corn yield maps.",
     "soybean": "Peak-season EVI2 had the highest yield correlation for soybean (Croatia; Iowa/Illinois yield-monitor studies); red-edge and "
                "short-wave-infrared (canopy water) bands also carry soybean yield signal — NDMI flags drought stress.",
-    "cotton": "NDRE / red-edge chlorophyll indices fitted farm cotton yields best (Uzbekistan); EVI edged NDVI/NDRE in Brazilian harvester maps; "
+    "cotton": "NDRE fitted farm cotton yields best of NDVI, MSAVI2, CIre and NDRE (Sentinel-2, Uzbekistan); canopy reflectance tied to lint "
+              "yield most strongly at early flowering (Zhao et al. 2007); EVI edged NDVI/NDRE in Brazilian harvester maps; "
               "red-edge indices are weak early, so NDVI leads before squaring. Best timing: flowering → boll fill (~75–120 days after sowing).",
     "peanut": "Pods are underground, so healthy green leaf area is the signal: simple-ratio-type indices (WDRVI ≈ simple ratio, red-edge simple ratio) "
               "track peanut leaf area best, NDVI and EVI also predicted yield; mid-season (60–105 days) is the most informative window. "
@@ -471,7 +535,7 @@ VI_WEIGHTS = {
     "cotton": {
         "early":      _W(NDVI=3, EVI2=3, WDRVI=2, GNDVI=1, GCVI=1, NDRE=0.5, CIre=0.5, NDMI=0.5),
         "vegetative": _W(WDRVI=3, EVI2=2, NDVI=2, NDRE=1, CIre=1, GCVI=1, GNDVI=1, NDMI=1),
-        "critical":   _W(CIre=3, NDRE=3, EVI2=2, WDRVI=1, GCVI=1, GNDVI=1, NDMI=1, NDVI=0.5),
+        "critical":   _W(NDRE=3, CIre=3, EVI2=2, WDRVI=1, GCVI=1, GNDVI=1, NDMI=1, NDVI=0.5),
         "late":       _W(NDVI=2, EVI2=2, NDRE=1, CIre=1, WDRVI=1, GCVI=1, GNDVI=1, NDMI=1),
     },
     "peanut": {
@@ -494,11 +558,27 @@ VI_EVIDENCE = {   # one line per index: where the yield evidence for it comes fr
 }
 
 
+# Indices built from the same two bands are rescalings of each other and rank fields identically
+# (WDRVI and NDVI are both monotone in NIR/red, GCVI and GNDVI in NIR/green, CIre and NDRE in NIR/red-edge).
+# The consensus therefore counts each band FAMILY once — five independent signals, not eight.
+VI_FAMILY = {"NDVI": "red", "WDRVI": "red", "GNDVI": "green", "GCVI": "green", "NDRE": "red-edge", "CIre": "red-edge",
+             "EVI2": "EVI2", "NDMI": "SWIR"}
+
+
 def vi_weights(crop: str, dap) -> dict:
     st_ = stage_at(crop, dap)
     key = st_.key if st_ is not None and st_.key in ("early", "vegetative", "critical", "late") else "critical"
     w = VI_WEIGHTS.get(crop, VI_WEIGHTS["cotton"])[key]
-    return {v: float(w.get(v, 1.0)) for v in ALL_VI}
+    full = {v: float(w.get(v, 1.0)) for v in ALL_VI}
+    star = st_.vi if st_ is not None and st_.key in ("early", "vegetative", "critical", "late") else critical(crop).vi
+    out = {v: 0.0 for v in ALL_VI}
+    for fam in dict.fromkeys(VI_FAMILY.values()):
+        mem = [v for v in ALL_VI if VI_FAMILY.get(v) == fam]
+        if not mem:
+            continue
+        rep_ = star if star in mem else max(mem, key=lambda v: full[v])     # one member speaks for the family
+        out[rep_] = max(full[v] for v in mem)
+    return out
 
 
 def consensus(per_vi: dict, weights: dict) -> pd.DataFrame:
@@ -522,9 +602,9 @@ def consensus(per_vi: dict, weights: dict) -> pd.DataFrame:
     vis = [c[4:] for c in out.columns if c.startswith("pct_")]
     P = out[[f"pct_{v}" for v in vis]].to_numpy(dtype=float)
     W = np.array([weights.get(v, 1.0) for v in vis], dtype=float)[None, :] * np.isfinite(P)
-    out["n_vi"] = np.isfinite(P).sum(axis=1)
+    out["n_vi"] = (np.isfinite(P) & (W > 0)).sum(axis=1)                 # independent signals (one per band family)
     out["cons_score"] = np.where(W.sum(axis=1) > 0, np.nansum(np.nan_to_num(P) * W, axis=1) / np.maximum(W.sum(axis=1), 1e-9), np.nan)
-    ok = out["n_vi"] >= max(2, len(vis) // 2)
+    ok = out["n_vi"] >= max(2, int((np.array([weights.get(v, 1.0) for v in vis]) > 0).sum()) // 2)
     out.loc[~ok, "cons_score"] = np.nan
     r = out["cons_score"].rank(ascending=False, method="first")
     out["cons_rank"] = r
@@ -535,7 +615,7 @@ def consensus(per_vi: dict, weights: dict) -> pd.DataFrame:
 
 def agreement(row: pd.Series, weights: dict) -> dict:
     """How the indices see one field: weighted share that put it in the bottom half / bottom quarter, and its rank range."""
-    vis = [c[4:] for c in row.index if c.startswith("pct_") and pd.notna(row[c])]
+    vis = [c[4:] for c in row.index if c.startswith("pct_") and pd.notna(row[c]) and weights.get(c[4:], 1.0) > 0]
     if not vis:
         return {}
     w = np.array([weights.get(v, 1.0) for v in vis]); p = np.array([row[f"pct_{v}"] for v in vis], dtype=float)

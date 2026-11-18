@@ -234,7 +234,7 @@ def weather_for(lon: float, lat: float, planting: dt.date, log=print) -> pd.Data
     """Daily weather around the season (Open-Meteo archive, cached per ~10 km cell). None if unavailable."""
     try:
         from .weather import get_daily
-        end = min(dt.date.today() - dt.timedelta(days=1), planting + dt.timedelta(days=100))
+        end = min(dt.date.today() - dt.timedelta(days=1), planting + dt.timedelta(days=200))   # whole season: heat-unit growth stages
         return get_daily(lon, lat, str(planting - dt.timedelta(days=75)), str(end))
     except Exception as e:
         log(f"weather unavailable: {type(e).__name__}: {e}")
