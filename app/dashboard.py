@@ -158,6 +158,15 @@ div[data-testid="stDataFrame"] { border-radius:14px; overflow:hidden; }
 .callout.warn { background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; }
 .callout.err { background:#fef2f2; border:1px solid #fecaca; color:#991b1b; }
 .callout.info { background:#eff6ff; border:1px solid #bfdbfe; color:#1e3a8a; }
+.callout.ok { background:#f0fdf4; border:1px solid #bbf7d0; color:#14532d; }
+.pick { font-size:.8rem; background:#fefce8; border:1px solid #fde68a; border-radius:10px; padding:.4rem .6rem; margin:.3rem 0 .45rem; color:#713f12; }
+.pick.ok { background:#f0fdf4; border-color:#bbf7d0; color:#14532d; }
+.flow { display:flex; align-items:stretch; gap:.5rem; margin:.4rem 0 .6rem; flex-wrap:wrap; }
+.flow > i { align-self:center; color:#94a3b8; font-style:normal; }
+.flow .fl { flex:1 1 180px; border:1px solid var(--line); border-radius:12px; padding:.45rem .75rem; background:#fff; display:flex; flex-direction:column; }
+.flow .fl b { font-size:.84rem; color:#0f172a; } .flow .fl span { font-size:.74rem; color:var(--muted); }
+.flow .fl.done { background:#f0fdf4; border-color:#bbf7d0; } .flow .fl.done b { color:#15803d; }
+.flow .fl.next { background:#eff6ff; border-color:#93c5fd; box-shadow:0 0 0 3px #dbeafe; } .flow .fl.next b { color:#1d4ed8; }
 .howstrip { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:.6rem; margin:0 0 .9rem; }
 .howstrip .hs { display:flex; gap:.6rem; align-items:flex-start; background:#fff; border:1px solid var(--line); border-radius:14px; padding:.7rem .85rem; font-size:.82rem; color:#334155; line-height:1.45; }
 .howstrip .hn { flex:0 0 1.5rem; height:1.5rem; border-radius:999px; background:#0f172a; color:#fff; font-weight:700; font-size:.78rem; display:flex; align-items:center; justify-content:center; }
@@ -398,10 +407,35 @@ ss = st.session_state
 ss.setdefault("geom", None); ss.setdefault("geom_src", None); ss.setdefault("center", (31.45, -83.52)); ss.setdefault("vi_cache", {}); ss.setdefault("season_cache", {}); ss.setdefault("now_cache", {})
 
 
-def set_geom(geom, src):
-    ss.geom, ss.geom_src = geom, src
+def set_geom(geom, src, origin="user"):
+    ss.geom, ss.geom_src, ss.geom_origin = geom, src, origin
     ss.center = (geom.centroid.y, geom.centroid.x)
-    ss.pop("check_date", None); ss.pop("example", None)
+    ss.pop("check_date", None); ss.pop("example", None); ss.pop("cand", None)
+
+
+def field_src(f, how=""):
+    return f"CSB field {f['field_id']} · {f['crop_latest']} 2025 · {f['acres']:.0f} ac" + (f" ({how})" if how else "")
+
+
+def set_cand(geom, src, origin):
+    """A field picked but not confirmed yet: shown on the map until 'Use this field' is pressed."""
+    ss.cand = {"geom": geom, "src": src, "origin": origin}
+    ss.center = (geom.centroid.y, geom.centroid.x)
+
+
+def confirm_cand():
+    c_ = ss.get("cand")
+    if c_:
+        reset_results()
+        set_geom(c_["geom"], c_["src"], c_["origin"])
+        if c_["origin"] == "default" and c_.get("planting"):       # the default field comes with its known 2025 planting date
+            ss["planting"] = c_["planting"]
+
+
+def cand_pending() -> bool:
+    """True while the user picked a field (map / point / drawing) and has not confirmed it — everything else waits."""
+    c_ = ss.get("cand")
+    return bool(c_) and c_["origin"] != "default" and (ss.geom is None or not c_["geom"].equals(ss.geom))
 
 
 def load_example(crop_, i=0):
@@ -411,7 +445,7 @@ def load_example(crop_, i=0):
         return
     r_ = g_.iloc[0]
     reset_results()
-    set_geom(r_.geometry, f"CSB field {fid} · {crop_} 2025 · {r_['acres']:.0f} ac")
+    set_geom(r_.geometry, f"CSB field {fid} · {crop_} 2025 · {r_['acres']:.0f} ac", origin="example")
     ss["crop"], ss["planting"], ss["radius"] = crop_, pl, 7
     ss["_last_crop"] = crop_
     ss.check_date = str(asof); ss.auto_process = True
@@ -427,7 +461,33 @@ def reset_results():
 # ============================================================================ sidebar
 with st.sidebar:
     html('<div class="sb-brand"><div class="sb-logo">F</div><b>FieldRank</b></div>')
-    html('<div class="sb-h">Your field</div>')
+    html('<div class="sb-h">1 · Crop</div>')
+    crop = segmented("Crop", C.CROPS, "cotton", "crop", format_func=str.title)
+    if ss.get("_last_crop") != crop:                  # a new crop → its default field is put on the map (until one is confirmed)
+        ss["_last_crop"] = crop
+        if "result" not in ss and ss.get("geom_origin") in (None, "default", "example"):
+            ss.geom = None; ss.geom_src = None; ss.geom_origin = None
+            _ex = STORE.by_id(EXAMPLES[crop][0][0]) if EXAMPLES.get(crop) else None
+            if _ex is not None and len(_ex):
+                set_cand(_ex.geometry.iloc[0], field_src(_ex.iloc[0], f"default {crop} field"), "default")
+                ss.cand["planting"] = EXAMPLES[crop][0][3]
+    if ss.geom is None and not ss.get("cand") and EXAMPLES.get(crop):
+        _ex = STORE.by_id(EXAMPLES[crop][0][0])
+        if len(_ex):
+            set_cand(_ex.geometry.iloc[0], field_src(_ex.iloc[0], f"default {crop} field"), "default")
+            ss.cand["planting"] = EXAMPLES[crop][0][3]
+    _exs = EXAMPLES.get(crop, [])
+    LOCK = cand_pending()
+    if _exs:
+        with st.expander(f"Try an example {crop} field", expanded=False):
+            _lab = [p_ for _, p_, _, _, _ in _exs]
+            _i = st.radio("Example", range(len(_exs)), format_func=lambda k: _lab[k], key=f"ex_pick_{crop}", label_visibility="collapsed")
+            _f, _p, _w, _pl, _ck = _exs[_i]
+            html(f'<div class="sb-note">{_w}. Planted ≈ {_pl:%b %d} · checked {_ck:%b %d, %Y} (2025 season).</div>')
+            st.button(f"Load this {crop} field", key=f"ex_load_{crop}", use_container_width=True, on_click=load_example, args=(crop, _i),
+                      disabled=LOCK)
+
+    html('<div class="sb-h">2 · Your field</div>')
     ss.setdefault("up_nonce", 0)
     ups = st.file_uploader("Upload boundary", type=UPLOAD_TYPES, accept_multiple_files=True, label_visibility="collapsed", key=f"uploader_{ss.up_nonce}",
                            help="Shapefile (select .shp + .shx + .dbf + .prj together, or one .zip) · KML / KMZ · GeoJSON · GeoPackage · "
@@ -487,33 +547,28 @@ with st.sidebar:
             g_, src_ = f_.geometry, f"CSB field {f_['field_id']} · {f_['crop_latest']} 2025 · {f_['acres']:.0f} ac (from point in {upname})"
             st.caption(f"The upload is a point, so the field it falls in was used ({f_['acres']:.0f} ac).")
         if ss.geom_src != src_:
-            set_geom(g_, src_); reset_results()
+            set_geom(g_, src_, "upload"); reset_results()
         for n_ in ss.get("up_notes", []):
             st.caption(f"ℹ️ {n_}")
-    # before a field is chosen, the lat/lon boxes point at the selected crop's example field
-    _cr = ss.get("crop", "cotton")
-    if ss.geom is None and ss.get("_last_crop") != _cr:
-        ss["_last_crop"] = _cr
-        ss.center = example_center(_cr) or ss.center
     c1, c2 = st.columns(2)
-    lat_in = c1.number_input("Latitude", value=float(ss.center[0]), format="%.5f")
-    lon_in = c2.number_input("Longitude", value=float(ss.center[1]), format="%.5f")
-    if st.button("Use the field at this point", use_container_width=True):
+    _ce = tuple(round(float(x_), 5) for x_ in ss.center)
+    lat_in = c1.number_input("Latitude", value=_ce[0], format="%.5f")
+    lon_in = c2.number_input("Longitude", value=_ce[1], format="%.5f")
+    if (round(lat_in, 5), round(lon_in, 5)) != _ce:           # typed a new point → the field there becomes the pick
         f = STORE.at(lon_in, lat_in)
-        set_geom(f.geometry, f"CSB field {f['field_id']} · {f['crop_latest']} 2025 · {f['acres']:.0f} ac")
-        reset_results()
-    html('<div class="sb-note">…or click a field / draw a polygon on the map.</div>')
+        set_cand(f.geometry, field_src(f, "from the point"), "point"); st.rerun()
+    cand_ = ss.get("cand")
+    if cand_ and (ss.geom is None or not cand_["geom"].equals(ss.geom)):
+        html(f'<div class="pick"><b>{"Default" if cand_["origin"] == "default" else "Picked"}:</b> {cand_["src"]}</div>')
+        st.button("✓ Use this field", key="use_field", type="primary", use_container_width=True, on_click=confirm_cand)
+        if LOCK:
+            html('<div class="sb-note" style="color:#b45309"><b>Confirm the field first</b> — or click another one on the map. '
+                 'The other buttons wait until then.</div>')
+    elif ss.geom is not None:
+        html(f'<div class="pick ok">✓ <b>My field:</b> {(ss.geom_src or "")[:70]}</div>')
+    html('<div class="sb-note">Type a point, click a field or draw a boundary on the map — then <b>✓ Use this field</b>.</div>')
 
-    html('<div class="sb-h">Crop & planting</div>')
-    crop = segmented("Crop", C.CROPS, "cotton", "crop", format_func=str.title)
-    _exs = EXAMPLES.get(crop, [])
-    if _exs:
-        with st.expander(f"Try an example {crop} field", expanded=ss.geom is None):
-            _lab = [p_ for _, p_, _, _, _ in _exs]
-            _i = st.radio("Example", range(len(_exs)), format_func=lambda k: _lab[k], key=f"ex_pick_{crop}", label_visibility="collapsed")
-            _f, _p, _w, _pl, _ck = _exs[_i]
-            html(f'<div class="sb-note">{_w}. Planted ≈ {_pl:%b %d} · checked {_ck:%b %d, %Y} (2025 season).</div>')
-            st.button(f"Load this {crop} field", key=f"ex_load_{crop}", use_container_width=True, on_click=load_example, args=(crop, _i))
+    html('<div class="sb-h">3 · Planting & search</div>')
     ss.setdefault("planting", dt.date(dt.date.today().year, 5, 5)); ss.setdefault("radius", 7)
     _pmin, _pmax = dt.date(FIRST_SEASON, 1, 1), dt.date(dt.date.today().year, 12, 31)
     if not (_pmin <= ss["planting"] <= _pmax):
@@ -531,7 +586,9 @@ with st.sidebar:
     ss["radius"] = min(ss["radius"], C.MAX_RADIUS_KM)
     radius = st.slider("Search radius (km)", 2, C.MAX_RADIUS_KM, key="radius",
                        help="Every field of your crop inside this circle is compared. Bigger = more fields, a bit slower.")
-    process = st.button("Find comparable fields", type="primary", use_container_width=True) or bool(ss.pop("auto_process", False))
+    _no_field = ss.geom is None
+    process = st.button("Find comparable fields", type="primary", use_container_width=True, disabled=LOCK or _no_field,
+                        help="Confirm your field first (✓ Use this field)" if (LOCK or _no_field) else None) or bool(ss.pop("auto_process", False))
 
     if "result" in ss:
         html('<div class="sb-h">Compare only with fields that have…</div>')
@@ -859,9 +916,16 @@ if not has_result:
             ec = st.columns(4)
             for col_, (cr_, exs_) in zip(ec, EXAMPLES.items()):
                 col_.button(cr_.title(), key=f"ex_{cr_}", help=f"{exs_[0][1]} · {exs_[0][2]}",
-                            use_container_width=True, on_click=load_example, args=(cr_,))
-    html(f'<div class="pills" style="margin:.2rem 0 .8rem"><span class="pill {"g" if has_field else "dark"}">1 · Pick your field {"✓" if has_field else ""}</span>'
-         f'<span class="pill {"dark" if has_field else "soft"}">2 · Crop & planting date</span><span class="pill soft">3 · Find comparable fields</span></div>')
+                            use_container_width=True, on_click=load_example, args=(cr_,), disabled=LOCK)
+    html(f'<div class="pills" style="margin:.2rem 0 .8rem"><span class="pill g">1 · Crop: {crop} ✓</span>'
+         f'<span class="pill {"g" if has_field and not LOCK else "dark"}">2 · Pick & confirm your field {"✓" if has_field and not LOCK else ""}</span>'
+         f'<span class="pill {"dark" if has_field and not LOCK else "soft"}">3 · Planting date → Find comparable fields</span></div>')
+    if ss.get("cand") and (ss.geom is None or not ss.cand["geom"].equals(ss.geom)):
+        k1_, k2_ = st.columns([4, 1.2], vertical_alignment="center")
+        k1_.markdown(f'<div class="callout {"warn" if LOCK else "info"}" style="margin:0"><b>{"Picked" if LOCK else "Default " + crop + " field"}:</b> '
+                     f'{ss.cand["src"]}{(" · planted " + format(ss.cand["planting"], "%b %d, %Y") + " (set when you confirm)") if ss.cand.get("planting") else ""} — outlined in yellow. Press <b>✓ Use this field</b>, or click another field / draw your own.</div>',
+                     unsafe_allow_html=True)
+        k2_.button("✓ Use this field", key="use_field_main", type="primary", use_container_width=True, on_click=confirm_cand)
     with card():
         m = base_map()
         gj = picker_geojson(round(lon0, 4), round(lat0, 4), radius, planting.year)
@@ -874,19 +938,30 @@ if not has_result:
         if has_field:
             folium.GeoJson(gpd.GeoSeries([ss.geom]).__geo_interface__, style_function=lambda f: {"fillColor": "none", "color": "#60a5fa", "weight": 4}).add_to(m)
             pill_marker(m, ss.geom.centroid.y, ss.geom.centroid.x, "MY FIELD", BLUE)
+        _cd = ss.get("cand")
+        if _cd and (ss.geom is None or not _cd["geom"].equals(ss.geom)):
+            folium.GeoJson(gpd.GeoSeries([_cd["geom"]]).__geo_interface__,
+                           style_function=lambda f: {"fillColor": "#facc15", "fillOpacity": 0.25, "color": "#facc15", "weight": 4, "dashArray": "6 4"}).add_to(m)
+            pill_marker(m, _cd["geom"].centroid.y, _cd["geom"].centroid.x, "PICKED · confirm?", "#ca8a04")
         Draw(export=False, draw_options={"polyline": False, "circle": False, "marker": False, "circlemarker": False}).add_to(m)
         folium.LayerControl().add_to(m)
         out = st_folium(m, height=600, use_container_width=True, key="picker", returned_objects=["last_active_drawing", "last_clicked"])
         html(f'<div class="legend"><span><i class="dot" style="background:#16a34a"></i>{crop} fields ({LBL_YEAR})</span><span><i class="dot" style="background:#94a3b8"></i>other crops</span>'
              f'<span>◌ {radius} km search radius</span><span>click a field or draw your boundary</span></div>')
-    if out and out.get("last_active_drawing"):
-        g = shape(out["last_active_drawing"]["geometry"])
-        if ss.geom is None or not g.equals(ss.geom):
-            set_geom(g, "drawn polygon"); st.rerun()
-    elif out and out.get("last_clicked"):
-        p = out["last_clicked"]; f = STORE.at(p["lng"], p["lat"])
-        if f.geometry.contains(Point(p["lng"], p["lat"])) and (ss.geom is None or not f.geometry.equals(ss.geom)):
-            set_geom(f.geometry, f"CSB field {f['field_id']} · {f['crop_latest']} 2025 · {f['acres']:.0f} ac"); st.rerun()
+    _drw = out.get("last_active_drawing") if out else None
+    _clk = out.get("last_clicked") if out else None
+    _sig = (str(_drw)[:200] if _drw else None, (round(_clk["lat"], 6), round(_clk["lng"], 6)) if _clk else None)
+    _prev = ss.get("_map_sig") or (None, None)           # act on a click / drawing once — not again on every rerun
+    ss["_map_sig"] = _sig
+    if _drw and _sig[0] != _prev[0]:
+        g = shape(_drw["geometry"])
+        if not (ss.get("cand") and g.equals(ss.cand["geom"])) and (ss.geom is None or not g.equals(ss.geom)):
+            set_cand(g, "drawn boundary", "draw"); st.rerun()
+    elif _clk and _sig[1] != _prev[1]:
+        p = _clk; f = STORE.at(p["lng"], p["lat"])
+        if (f.geometry.contains(Point(p["lng"], p["lat"])) and (ss.geom is None or not f.geometry.equals(ss.geom))
+                and not (ss.get("cand") and f.geometry.equals(ss.cand["geom"]))):
+            set_cand(f.geometry, field_src(f, "clicked on the map"), "click"); st.rerun()
 
 # ============================================================================ process
 if process:
@@ -954,7 +1029,7 @@ if process:
     reset_results()
     ss.result = {"allf": allf, "table": table, "info": info, "gts": gts, "crop": crop, "planting": planting, "window": window, "pinfo": pinfo,
                  "radius": radius, "lag_days": lag_days, "n_crop_total": n_crop_total, "w_end": planting + dt.timedelta(days=DAYS_AFTER),
-                 "diag": diag, "center": (c.y, c.x), "n_capped": n_capped}
+                 "diag": diag, "center": (c.y, c.x), "n_capped": n_capped, "det_raw": coh, "wx": wx}
     st.rerun()
 
 if not has_result:
@@ -962,7 +1037,16 @@ if not has_result:
     st.stop()
 
 # ============================================================================ results: live filtering
-R = ss.result; T = R["table"].copy(); allf = R["allf"]; info = R["info"]; gts = R["gts"]; diag = R.get("diag", {})
+R = ss.result
+PLANT_COLS = ["est_planting", "plant_lo", "plant_hi", "plant_unc", "plant_conf", "plant_why", "lag_days", "delta_tdays"]
+if R.pop("recalib", False) and R.get("det_raw") is not None:     # the farmer confirmed the date → neighbours re-timed on my field
+    _pd, _pi = PD.estimate(R["det_raw"], R["crop"], R["planting"], "MY_FIELD", R.get("wx"), farmer_confirmed=bool(R.get("plant_confirmed")))
+    R["table"] = R["table"].drop(columns=[c_ for c_ in PLANT_COLS if c_ in R["table"]]).merge(
+        _pd[["field_id"] + [c_ for c_ in PLANT_COLS if c_ in _pd]], on="field_id", how="left")
+    R["pinfo"] = _pi
+    for k_ in ("rank_key", "rank_bars", "donut", "cons_key"):
+        ss.pop(k_, None)
+T = R["table"].copy(); allf = R["allf"]; info = R["info"]; gts = R["gts"]; diag = R.get("diag", {})
 if "map_geom" not in R:          # light copy of the boundaries for the maps (~2 m simplify, 5 decimals): far less to send to the browser
     import shapely
     _mg = allf[["field_id", "geometry", "acres"]].copy()
@@ -1053,7 +1137,7 @@ def _rank_form():
             ss.pop("check_date", None)
         else:
             ss.check_date = str(d)
-        ss.now_request = True; ss.rank_on = True
+        ss.now_request = True; ss.rank_on = True; ss.goto_tab = 2
         st.rerun()
 
 
@@ -1270,7 +1354,7 @@ if NS and NS.get("ok") and ranked is not None and pd.notna(mr["rank"]):
 
 
 def _check_now():
-    ss.rank_on = True; ss.now_request = True
+    ss.rank_on = True; ss.now_request = True; ss.goto_tab = 2
 
 
 def open_rank():
@@ -1338,7 +1422,8 @@ with k2, card():
         sat_ = PINFO.get("my_sat_planting")
         html(f'<div class="kpi"><div class="lab">My green-up</div><div class="val">{anchor.strftime("%b %d")}</div>'
              f'<div class="sub">{lag:+d} d after planting'
-             + {"confirmed": ' · <b style="color:#15803d">confirms my date ✓</b>', "partly": ' · partly confirms my date'}.get(PINFO.get("cal_state"), "")
+             + {"confirmed": ' · <b style="color:#15803d">confirms my date ✓</b>', "partly": ' · partly confirms my date',
+                "farmer": ' · <b style="color:#15803d">date confirmed by you ✓</b>'}.get(PINFO.get("cal_state"), "")
              + (f'<br>satellite: planted ≈ <b>{sat_:%b %d}</b> ± {PINFO.get("my_sat_unc", 0):.0f} d' if sat_ else "") + '</div>'
              f'<div class="sub" style="margin-top:.3rem"><span class="pill {"g" if pc_ == "high" else "a"}">{"Well dated" if pc_ == "high" else "Roughly dated"}</span>'
              + (f' &nbsp;NDVI {pd.Timestamp(T.loc[is_me, "onset_ndvi"].iloc[0]):%b %d} · EVI2 {pd.Timestamp(T.loc[is_me, "onset_evi2"].iloc[0]):%b %d}'
@@ -1349,7 +1434,7 @@ with k2, card():
              f'<div class="sub"><span class="pill a">assumed {anchor.strftime("%b %d")}</span> &nbsp;planting + {NOMINAL_EMERGENCE_DAYS} d</div></div>')
     with popover("Planting dates"):
         sc = info.get("status_counts", {})
-        _cs = {"confirmed": "confirmed by my field", "partly": f"{PINFO.get('cal_weight', 0) * 100:.0f}% my field + crop default"}.get(PINFO.get("cal_state"), "crop default")
+        _cs = {"confirmed": "confirmed by my field", "farmer": "my field, date confirmed by me", "partly": f"{PINFO.get('cal_weight', 0) * 100:.0f}% my field + crop default"}.get(PINFO.get("cal_state"), "crop default")
         meth_ = (f"local weather (degree-days), {_cs} — "
                  f"{PINFO.get('target_gdd') or 0:.0f} °C-days from planting to visible green-up" if PINFO.get("method") == "degree-days"
                  else f"{'my field' if PINFO.get('calibrated') else 'typical'} timing in days (weather not available)")
@@ -1448,9 +1533,18 @@ def _use_sat_planting(d_):
     ss.pop("check_date", None)
 
 
+def _keep_my_planting():
+    ss.result["plant_confirmed"] = True; ss.result["recalib"] = True
+
+
 _sat = PINFO.get("my_sat_planting")
 _off = (R["planting"] - _sat).days if _sat else None
-if PINFO.get("warn") or (_off is not None and abs(_off) >= PLANT_OFF_DAYS):
+if R.get("plant_confirmed"):
+    html(f'<div class="callout ok">✓ <b>You confirmed planting on {R["planting"]:%b %d, %Y}.</b> '
+         + (f'Your field greened up {PINFO.get("my_lag_days")} days later, and that is taken as real (dry soil, a replant or slow emergence) — '
+            'neighbours are timed with <i>your</i> field\'s heat units, since they had the same weather.' if PINFO.get("cal_state") == "farmer" else
+            'Neighbours keep the typical crop timing because your field\'s green-up could not be used.') + '</div>')
+elif PINFO.get("warn") or (_off is not None and abs(_off) >= PLANT_OFF_DAYS):
     _lag = PINFO.get("my_lag_days")
     _wxt = "in this season's weather" if PINFO.get("method") == "degree-days" else "with typical timing"
     with st.container(key="plantcheck"):
@@ -1465,8 +1559,10 @@ if PINFO.get("warn") or (_off is not None and abs(_off) >= PLANT_OFF_DAYS):
                     'your date</b>. ' if PINFO.get("warn") else
                     'Neighbours are still matched fairly — on how far their green-up is from yours — but a typo here also shifts the season '
                     'stage and the ★ index. ')
-                 + 'If the date was mistyped, use the satellite date; if you replanted or know it\'s right, keep yours.</div>')
+                 + 'Mistyped? Use the satellite date. Sure it\'s right (replant, dry soil, late emergence)? Keep yours — '
+                   'neighbours are then timed with your field\'s own heat units.</div>')
         with cB:
+            st.button(f"✓ Yes, {R['planting']:%b %d} is right", key="keep_plant", use_container_width=True, on_click=_keep_my_planting)
             if _sat:
                 st.button(f"Use {_sat:%b %d} and search again", key="use_sat_plant", type="primary", use_container_width=True,
                           on_click=_use_sat_planting, args=(_sat,))
@@ -1574,8 +1670,25 @@ def index_strip():
                  alt.Tooltip("w:Q", title="weight now"), alt.Tooltip("why:N", title="evidence")])
     cons = alt.Chart(pd.DataFrame({"pct": [float(MYC["cons_score"])]})).mark_rule(color="#7c3aed", strokeWidth=2.5, strokeDash=[5, 3]).encode(x="pct:Q")
     st.altair_chart((bands + cons + dots).properties(height=34 * len(d) + 30).configure_view(strokeWidth=0), use_container_width=True)
-tab_o, tab_f, tab_g, tab_m, tab_ts, tab_s, tab_d = st.tabs(
-    ["Overview", "Filtering", "Green-up", "Map & ranking", "TS vs reference", "Season summary", "Data"])
+# the order the work is done in: 1-2 who is comparable → (rank) → 3-4 where I stand and should I scout → 5-6 the season → data
+_ranked_ok = IMG_DATE is not None
+_season_ok = S_season is not None and len(S_season) > 0
+html('<div class="flow">'
+     '<div class="fl done"><b>✓ Comparable fields</b><span>1 Filtering · 2 Green-up</span></div><i>→</i>'
+     + (f'<div class="fl done"><b>✓ Ranked · {IMG_DATE:%b %d}</b><span>3 Map & ranking · 4 Scout answer</span></div>' if _ranked_ok else
+        '<div class="fl next"><b>📅 Rank my field</b><span>unlocks 3 Map & ranking · 4 Scout answer</span></div>') + '<i>→</i>'
+     + ('<div class="fl done"><b>✓ Season</b><span>5 Trend vs reference · 6 Season summary</span></div>' if _season_ok else
+        '<div class="fl' + (' next' if _ranked_ok else '') + '"><b>Season</b><span>5 Trend vs reference · 6 Season summary</span></div>')
+     + '</div>')
+tab_f, tab_g, tab_m, tab_o, tab_ts, tab_s, tab_d = st.tabs(
+    ["1 · Filtering", "2 · Green-up", "3 · Map & ranking", "4 · Scout answer", "5 · Trend vs reference", "6 · Season summary", "Data"])
+_goto = ss.pop("goto_tab", None)
+if _goto is not None:                    # after ranking, open "Map & ranking" by itself
+    import streamlit.components.v1 as _components
+    _components.html(f"""<script>
+      const go = (n) => {{ const t = window.parent.document.querySelectorAll('[data-testid="stTabs"] button[role="tab"]');
+        if (t.length > {int(_goto)}) t[{int(_goto)}].click(); else if (n < 40) setTimeout(() => go(n + 1), 100); }};
+      setTimeout(() => go(0), 120);</script>""", height=0)
 tab_det = tab_o            # details sit right under the answer in the same tab
 with tab_o, card():
     is_today = CHECK_DATE >= dt.date.today()
@@ -1651,7 +1764,7 @@ with tab_det:
     else:
         with card():
             html(f'<div class="ctitle" style="font-size:1.15rem">Details behind the answer · image {NS["date"]:%b %d}</div>'
-                 f'<div class="csub">same numbers as Overview, my rank, the map and the ranking</div>')
+                 f'<div class="csub">same numbers as the scout answer above, my rank, the map and the ranking</div>')
             v2, v3 = st.columns([1.3, 1])
             with v2:
                 html('<div class="ctitle" style="margin-top:.2rem">The last few weeks</div><div class="csub">my field as % of the best comparable fields on each of its clear images — same method as my rank</div>')
@@ -1876,6 +1989,12 @@ if ranked is not None:
         sel_id = None
 MAP_H = 700 if ranked is not None else 580       # fills its card next to the ranking chart
 with tab_m:
+    if ranked is None:
+        h1_, h2_ = st.columns([4, 1], vertical_alignment="center")
+        h1_.markdown('<div class="callout info" style="margin:0">The map shows <b>who is comparable</b> and what each field shares with yours. '
+                     '<b>Rank my field</b> to add the ranking view, the bars and the scout answer.</div>', unsafe_allow_html=True)
+        if h2_.button("📅 Rank my field", key="rank_from_map", type="primary", use_container_width=True):
+            open_rank()
     m1, m2 = st.columns([1.55, 1])
     with m1, card():
         hcol, vcol = st.columns([1.2, 1])
@@ -1984,7 +2103,7 @@ def _season_missing_banner(key):
 def _season_cta(key):
     html('<div class="ctitle">Season not loaded yet</div>'
          '<div class="note" style="margin-bottom:.9rem">Pick a date range — FieldRank reads every clear Sentinel-2 look of your field and the similar-planting '
-         'fields once, then shows <b>TS vs reference</b> and the <b>Season summary</b> instantly.</div>')
+         'fields once, then shows <b>Trend vs reference</b> and the <b>Season summary</b> instantly.</div>')
     if season_dialog and st.button("Choose season range", type="primary", key=key):
         season_dialog()
 
@@ -2123,6 +2242,7 @@ with tab_g:
          f'<div class="hs"><div class="hn">2</div><div><b>Satellite: your field greened up · {anchor:%b %d}</b><br>'
          + (f'{_lag_} days later. ' if _lag_ is not None else 'Not visible — a typical delay is assumed. ')
          + ({"confirmed": f'A typical delay — this <b>confirms your date</b>, and the timing (in {_how}) is learned from <i>your</i> field for this season.',
+             "farmer": f'You confirmed this date, so your field\'s own delay (in {_how}) is used in full for the neighbours.',
              "partly": f'The timing (in {_how}) blends your field ({PINFO.get("cal_weight", 0) * 100:.0f}%) with the {R["crop"]} default, '
                        'because the green-up was blurred or the delay unusual.'}.get(PINFO.get("cal_state"),
                                                                                     f'Typical {R["crop"]} timing (in {_how}) is used — your field could not confirm it.'))
@@ -2162,7 +2282,7 @@ with tab_g, card():
             ranked_line = IMG_DATE is not None and ranked is not None and pd.notna(mr["rank"])
             gi_ = segmented("Green-up index", ["NDVI", "EVI2"], "NDVI", "gu_index") if "evi2" in gts else "NDVI"
             gcol_ = gi_.lower()
-            html(f'<div class="ctitle">{gi_} after planting</div><div class="csub">blue = my field · green = comparable fields · '
+            html(f'<div class="ctitle">{gi_} after planting</div><div class="csub">blue = my field · green = comparable fields under the current filters (dark dashed = their weekly median) · '
                  f'black dashed = the planting date you entered, shaded ± {window} days (the planting match) · blue dashed = my green-up'
                  + (f' · <b style="color:#ea580c">orange line = the image my field is ranked on ({IMG_DATE:%b %d})</b>' if ranked_line else
                     ' · rank my field to mark the ranking date here') + '</div>')
@@ -2176,19 +2296,37 @@ with tab_g, card():
             if "sensor" not in gp:
                 gp["sensor"] = "S2"
             gp["sensor"] = gp["sensor"].fillna("S2").map({"S2": "Sentinel-2 10 m", "S30": "HLS Sentinel-2", "L89": "Landsat", "L30": "HLS Landsat"}).fillna("Sentinel-2 10 m")
-            sc_ = alt.Scale(domain=["my field", "comparable", "other"], range=[BLUE, "#16a34a", "#e2e8f0"])
+            sc_ = alt.Scale(domain=["my field", "comparable", "comparable · median", "other fields"], range=[BLUE, "#16a34a", "#14532d", "#cbd5e1"])
+            gp["group"] = gp["group"].replace({"other": "other fields"})
             _pl = pd.Timestamp(R["planting"])
             band = alt.Chart(pd.DataFrame({"s": [_pl - pd.Timedelta(days=window)], "e": [_pl + pd.Timedelta(days=window)],
                                            "t": [f"planted ± {window} d"]})).mark_rect(opacity=0.14, color="#16a34a").encode(
                 x="s:T", x2="e:T", tooltip=alt.Tooltip("t:N", title=""))
-            ln = alt.Chart(gp[gp["field_id"] != "MY_FIELD"]).mark_line(opacity=0.45, strokeWidth=1).encode(
-                x=alt.X("date:T", title=None, axis=alt.Axis(format="%b %d")), y=alt.Y("ndvi:Q", title=gi_, scale=alt.Scale(domain=[0, 1])), detail="field_id:N",
-                color=alt.Color("group:N", scale=sc_, legend=alt.Legend(title=None, orient="top")))
+            # drawn in order: the rest faint at the back, comparable fields on top of them, their median on top of those
+            n_cmp_ = int(gp.loc[gp["group"] == "comparable", "field_id"].nunique())
+            show_other = st.toggle("Show the other fields (faint)", value=n_cmp_ < 40, key="gu_other",
+                                   help="Fields that are not comparable under the current filters, drawn faint behind.")
+            xenc = alt.X("date:T", title=None, axis=alt.Axis(format="%b %d"))
+            yenc = alt.Y("ndvi:Q", title=gi_, scale=alt.Scale(domain=[0, 1]))
+            cenc = alt.Color("group:N", scale=sc_, legend=alt.Legend(title=None, orient="top", symbolOpacity=1))
+            oth_ = gp[gp["group"] == "other fields"]
+            cmp_ = gp[gp["group"] == "comparable"]
+            ln = alt.layer(*([alt.Chart(oth_).mark_line(opacity=0.25, strokeWidth=0.8).encode(x=xenc, y=yenc, detail="field_id:N", color=cenc)]
+                             if show_other and len(oth_) else []),
+                           alt.Chart(cmp_).mark_line(opacity=0.55 if n_cmp_ > 60 else 0.8, strokeWidth=1.3).encode(x=xenc, y=yenc, detail="field_id:N", color=cenc))
+            if n_cmp_ >= 3:   # median of the comparable fields on each look (HLS looks are shared by all fields of a tile)
+                med_ = (cmp_.assign(wk=pd.to_datetime(cmp_["date"]).dt.to_period("W").dt.start_time + pd.Timedelta(days=3))
+                        .groupby("wk")["ndvi"].agg(["median", "size"]).reset_index())
+                med_ = med_[med_["size"] >= max(3, n_cmp_ // 5)].rename(columns={"wk": "date", "median": "ndvi"}).assign(group="comparable · median")
+                if len(med_) >= 3:
+                    ln = ln + alt.Chart(med_).mark_line(strokeWidth=3, strokeDash=[6, 3]).encode(x=xenc, y=yenc, color=cenc)
             my_ = gp[gp["field_id"] == "MY_FIELD"]
             mine = (alt.Chart(my_).mark_line(strokeWidth=3.5).encode(x="date:T", y="ndvi:Q", color=alt.Color("group:N", scale=sc_, legend=None))
                     + alt.Chart(my_).mark_point(size=70, filled=True, strokeWidth=2).encode(
                         x="date:T", y="ndvi:Q", color=alt.value(BLUE),
-                        shape=alt.Shape("sensor:N", scale=alt.Scale(domain=["HLS Sentinel-2", "HLS Landsat", "Sentinel-2 10 m", "Landsat"], range=["circle", "diamond", "square", "triangle-up"]),
+                        shape=alt.Shape("sensor:N", scale=alt.Scale(domain=[k_ for k_ in ["HLS Sentinel-2", "HLS Landsat", "Sentinel-2 10 m", "Landsat"] if k_ in set(my_["sensor"])],
+                                                                    range=[v_ for k_, v_ in zip(["HLS Sentinel-2", "HLS Landsat", "Sentinel-2 10 m", "Landsat"],
+                                                                                                ["circle", "diamond", "square", "triangle-up"]) if k_ in set(my_["sensor"])]),
                                         legend=alt.Legend(title=None, orient="top")),
                         fill=alt.condition(alt.datum.sensor == "HLS Landsat", alt.value("#ffffff"), alt.value(BLUE)),
                         tooltip=[alt.Tooltip("date:T", format="%b %d"), alt.Tooltip("ndvi:Q", format=".3f", title=gi_), alt.Tooltip("sensor:N")]))

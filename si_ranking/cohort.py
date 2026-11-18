@@ -233,7 +233,7 @@ def _crossing(s: pd.DataFrame, planting: dt.date | None = None) -> dict:
 _S_GRID = np.array([2.0, 3.0, 4.0, 5.0, 6.5, 8.0, 10.0, 13.0, 17.0, 22.0])      # curve steepness (days)
 
 
-def _fit_onset(t: np.ndarray, v: np.ndarray, base: float, peak_i: int):
+def _fit_onset(t: np.ndarray, v: np.ndarray, base: float, peak_i: int, s_grid: np.ndarray | None = None, full: bool = False):
     """Fit an S-curve  v = b + a / (1 + exp(-(t - t0)/s))  through the looks up to the peak (bare soil → canopy).
     Fast and stable: every (t0, s) on a grid, with b and a solved exactly by least squares, best fit kept.
     Returns (onset_day, nrmse, amplitude) or None. Onset = the day the curve reaches ONSET_FRAC of its rise."""
@@ -249,7 +249,7 @@ def _fit_onset(t: np.ndarray, v: np.ndarray, base: float, peak_i: int):
     if len(tt) < 4:
         return None
     t0s = np.arange(tt[0] - 10, tt[-1] + 3, 0.5)
-    T0, S = np.meshgrid(t0s, _S_GRID, indexing="ij")
+    T0, S = np.meshgrid(t0s, _S_GRID if s_grid is None else np.asarray(s_grid, float), indexing="ij")
     X = 1.0 / (1.0 + np.exp(-(tt[None, None, :] - T0[..., None]) / S[..., None]))     # (t0, s, n)
     xm, vm = X.mean(-1), vv.mean()
     cov = ((X - xm[..., None]) * (vv - vm)).mean(-1); var = X.var(-1)
@@ -265,6 +265,8 @@ def _fit_onset(t: np.ndarray, v: np.ndarray, base: float, peak_i: int):
     nrmse = float(np.sqrt(sse[i, j] / len(tt)) / max(a_, 1e-6))
     if onset < tt[0] - 5 or onset > tt[-1]:          # extrapolated before the first look, or never reached
         return None
+    if full:
+        return float(onset), nrmse, a_, s_, float(B[i, j]), tt, vv
     return float(onset), nrmse, a_
 
 
@@ -298,9 +300,10 @@ def detect_greenup(s: pd.DataFrame, planting: dt.date | None = None) -> dict:
         if not len(after):
             continue
         peak_i = int(after[np.nanargmax(v[after])])
-        r = _fit_onset(t, v, base, peak_i)
+        r = _fit_onset(t, v, base, peak_i, full=True)
         if r is not None and r[1] <= FIT_MAX_NRMSE:
-            fits[col] = r
+            fits[col] = r[:3]
+            out[f"steep_{col}"] = r[3]
     day = lambda x: (d0 + pd.Timedelta(days=float(x))).date()
     if "ndvi" in fits:
         out["onset_ndvi"] = day(fits["ndvi"][0])
@@ -322,6 +325,72 @@ def detect_greenup(s: pd.DataFrame, planting: dt.date | None = None) -> dict:
     return out
 
 
+TEMPLATE_GAP = 12       # green-up inside a cloud gap longer than this → re-timed with the neighbours' curve shape
+TEMPLATE_MIN_REF = 5    # well-dated neighbours needed to learn that shape
+
+
+def _template_refit(det: pd.DataFrame, groups: dict, planting) -> pd.DataFrame:
+    """Cloud gaps: when clouds hide the days a field came up, a straight line across the gap puts green-up in the middle
+    of it. Fields of the same crop, area and season grow at about the same RATE, so the steepness of the well-dated
+    neighbours' curves is borrowed and only the TIMING is fitted to this field's own looks: the partly-green looks right
+    after the gap say how far up the curve the field already was, which places the green-up inside the gap.
+    The real gap is kept; the date is 'constrained' when ≥ 2 looks sit on the rise (not yet at full canopy)."""
+    if "steep_ndvi" not in det:
+        return det
+    good = det[(det["method"] == "curve") & (pd.to_numeric(det["gap_days"], errors="coerce") <= 10)]
+    sv = pd.to_numeric(good["steep_ndvi"], errors="coerce").dropna()
+    if len(sv) < TEMPLATE_MIN_REF:
+        return det
+    s_star = float(np.median(sv))
+    det = det.copy()
+    det["template_s"] = np.nan
+    det["constrained"] = False
+    todo = det.index[(det["greenup_status"] == "crossing") &
+                     ((det["method"] != "curve") | (pd.to_numeric(det["gap_days"], errors="coerce") > TEMPLATE_GAP))]
+    for ix in todo:
+        g = groups.get(det.at[ix, "field_id"])
+        if g is None or len(g) < 4:
+            continue
+        s = g.dropna(subset=["ndvi"]).sort_values("date")
+        if s["date"].duplicated().any():
+            s = s.groupby("date", as_index=False).agg(ndvi=("ndvi", "max"), **({"evi2": ("evi2", "max")} if "evi2" in s else {}))
+        d0 = s["date"].min()
+        t = ((s["date"] - d0).dt.total_seconds() / 86400.0).to_numpy()
+        pl_t = (pd.Timestamp(planting) - d0).total_seconds() / 86400.0 if planting is not None else -np.inf
+        ons = []
+        for col in ("ndvi", "evi2"):
+            if col not in s or s[col].notna().sum() < 4:
+                continue
+            v = s[col].to_numpy(dtype=float)
+            pre = v[(t <= pl_t + 5) & np.isfinite(v)]
+            base = float(np.quantile(pre, 0.2)) if len(pre) >= 2 else float(np.nanmin(v[:2]))
+            after = np.flatnonzero((t >= pl_t) & np.isfinite(v))
+            if not len(after):
+                continue
+            peak_i = int(after[np.nanargmax(v[after])])
+            r = _fit_onset(t, v, base, peak_i, s_grid=[s_star * f for f in (0.8, 1.0, 1.25)], full=True)
+            if r is None or r[1] > FIT_MAX_NRMSE * 1.25:
+                continue
+            onset, _, a_, s_, b_, tt, vv = r
+            frac = (vv - b_) / max(a_, 1e-6)
+            on_rise = int(((frac > 0.12) & (frac < 0.85) & (tt > onset)).sum())
+            ons.append((onset, on_rise))
+        if not ons:
+            continue
+        onset = float(np.mean([o for o, _ in ons]))
+        before, after_ = t[t <= onset], t[t > onset]
+        if not (len(before) and len(after_)):
+            continue
+        det.at[ix, "greenup_date"] = (d0 + pd.Timedelta(days=onset)).date()
+        det.at[ix, "method"] = "template"
+        det.at[ix, "template_s"] = round(s_star, 1)
+        det.at[ix, "gap_days"] = int(round(after_.min() - before.max()))
+        det.at[ix, "constrained"] = max(n for _, n in ons) >= 2
+        if len(ons) == 2:
+            det.at[ix, "agree_days"] = round(abs(ons[0][0] - ons[1][0]), 1)
+    return det
+
+
 def _detect_all(ts: pd.DataFrame, fields: gpd.GeoDataFrame, planting) -> pd.DataFrame:
     recs = []
     groups = {k: g for k, g in ts.groupby("field_id")} if len(ts) else {}
@@ -329,7 +398,7 @@ def _detect_all(ts: pd.DataFrame, fields: gpd.GeoDataFrame, planting) -> pd.Data
         g = groups.get(fid_, pd.DataFrame(columns=["date", "ndvi", "evi2", "sensor"]))
         d = detect_greenup(g.reindex(columns=["date", "ndvi", "evi2", "sensor"]), planting)
         d["field_id"] = fid_; recs.append(d)
-    return pd.DataFrame(recs)
+    return _template_refit(pd.DataFrame(recs), groups, planting)
 
 
 # ----------------------------------------------------------------------------- orchestration

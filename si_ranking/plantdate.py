@@ -45,6 +45,7 @@ GDD_TYPICAL = (0.6, 1.7)            # … and called a clear confirmation within
 # place and weather. A blurred green-up or an unusual delay is trusted only partly.
 CAL_WEIGHT = {("high", True): 1.0, ("high", False): 0.7, ("low", True): 0.7, ("low", False): 0.4}
 HIGH_MAX_GAP = 15                   # clear images ≤ 15 d apart around the green-up → about ± 1 week
+TEMPLATE_MAX_GAP = 35   # a cloud gap up to this long is bridged when the field has ≥ 2 looks on its rise after it
 HIGH_MIN_RISE = 0.12
 HIGH_MIN_MONO = 0.6
 AGREE = 6                           # NDVI vs EVI2 green-up, days
@@ -63,13 +64,19 @@ def plant_confidence(row) -> str | None:
 
 def _low_reasons(row) -> list[str]:
     r = []
-    if row.get("method", "curve") != "curve":
+    m_ = row.get("method", "curve")
+    tmpl_ok = m_ == "template" and bool(row.get("constrained")) and pd.notna(row.get("gap_days")) and row.get("gap_days") <= TEMPLATE_MAX_GAP
+    if m_ == "template" and not tmpl_ok:
+        r.append("green-up hidden by clouds — timed from the neighbours' curve with few looks on the rise")
+    elif m_ not in ("curve", "template"):
         r.append("no smooth growth curve (too few clear looks on the rise)")
     ag = row.get("agree_days")
     if pd.notna(ag) and ag > AGREE:
         r.append(f"NDVI and EVI2 disagree by {ag:.0f} days")
     gap = row.get("gap_days")
-    if pd.isna(gap) or gap > HIGH_MAX_GAP:
+    if tmpl_ok:
+        pass                                   # the gap is bridged by ≥ 2 looks on the rise + the neighbours' curve shape
+    elif pd.isna(gap) or gap > HIGH_MAX_GAP:
         r.append(f"clear images {gap:.0f} days apart around the green-up (clouds)" if pd.notna(gap) else "no clear images around the green-up")
     rise = row.get("rise")
     if pd.isna(rise) or rise < HIGH_MIN_RISE:
@@ -114,7 +121,8 @@ def _back(days, cum, gu, target):
     return pd.Timestamp(d).date()
 
 
-def estimate(det: pd.DataFrame, crop: str, my_planting: dt.date, my_id: str = "MY_FIELD", wx: pd.DataFrame | None = None):
+def estimate(det: pd.DataFrame, crop: str, my_planting: dt.date, my_id: str = "MY_FIELD", wx: pd.DataFrame | None = None,
+             farmer_confirmed: bool = False):
     """Adds est_planting, plant_lo, plant_hi, plant_unc, plant_conf, plant_why, lag_days to `det` (one row per field).
     Returns (det, info)."""
     det = det.copy()
@@ -152,7 +160,18 @@ def estimate(det: pd.DataFrame, crop: str, my_planting: dt.date, my_id: str = "M
             w = CAL_WEIGHT.get((my_conf, typical), 0.4)
             lag_days = w * my_lag + (1 - w) * GREENUP_DAYS[crop]
             info.update(calibrated=True, cal_weight=w)
-        info["cal_state"] = "confirmed" if info["cal_weight"] >= 0.95 else ("partly" if info["calibrated"] else "default")
+        # the farmer says the date is right (replanted, dry soil, slow emergence …): then the slow/fast green-up is real and the
+        # neighbours — same weather, same soil moisture — were most likely delayed the same way, so my own timing is used in full
+        if farmer_confirmed and my_lag is not None and my_lag > 0:
+            if cum is not None:
+                g_me = _gdd_between(days, cum, my_planting, my_gu.date())
+                if g_me:
+                    target_gdd = g_me
+            else:
+                lag_days = my_lag
+            info.update(calibrated=True, cal_weight=1.0)
+        info["cal_state"] = ("farmer" if farmer_confirmed and info["calibrated"] else
+                             "confirmed" if info["cal_weight"] >= 0.95 else ("partly" if info["calibrated"] else "default"))
         if not info["calibrated"]:
             info["warn"] = (f"My field greened up {my_lag} days {'after' if my_lag >= 0 else 'BEFORE'} the planting date entered — for {crop} "
                             f"this usually takes {LAG_DAYS_OK[0]}–{LAG_DAYS_OK[1]} days. Neighbours' planting dates use the typical "
